@@ -54,6 +54,8 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 | `get_order` | `GET /api/v1.0/orders/{orderKey}` → items, `totalPrice`, `totalGst`, `orderFee`, `canCancelOrder`, `orderState`, `stateHistory[]` (`New Order` → `Placed` → `Cancelled By User`, with timestamps) | token |
 | `place_order` | `POST /api/v2.0/orders` (HTTP 200; response `{orderRequestId, orderId, orderKey, studentKey, supplierServiceKey, supplierKey, supplierName, orderPlaced, error}`). **Exact request body (captured from the app, request blocked before sending):** `{"cartKey":"<guid>","totalCartAmount":6.19,"placeOrderRequests":[{"orderRequestId":"<guid>","studentKey":"…","supplierServiceKey":"…","supplierKey":"…","dueDate":"2026-11-06T10:30:00","orderAmount":5.8,"items":[{"itemKey":"…","quantity":1,"options":[],"questions":[]}],"orderOrigin":"Normal"}]}`. `totalCartAmount` = items + order fee; `orderAmount` = that order's item subtotal; `dueDate` is the service's `dueDate` from `itemlist`. The app sends `x-channel: ORDERINGPORTAL` (the user portal uses `USERPORTAL`), `x-brandid: 8`, and a per-request `x-correlation-id`. `cartKey` and `orderRequestId` look client-generated GUIDs (unverified). Options are `{optionKey, quantity}`-style entries (shape for required option sets not captured). | token |
 | `cancel_order` | `DELETE /api/v1.0/orders/{orderKey}`, request body is the orderKey string; HTTP 200, empty response. Only while `canCancelOrder` is true. Refund goes to the Flexischools **wallet**. | token |
+| `list_students` | `GET /api/v2.0/service-categories/1/students` → each student with `schoolKey`, `schoolSiteKey` and their `services[]` (service key, supplier key, site keys). One parent login covers all kids. | token |
+| `list_service_slots` | `POST /api/v1.0/available-services` with the student's services (each plus `schoolKey`, `schoolSiteKey`) → per service the **exact cutoff** (`cutOffTime` local, `cutOffTimeUtc`), `nextOrderFulfillmentDate`, `supplierDistributionTimeKey` | token |
 | `get_order_days` | `POST /api/v1.0/students/{student}/supplierservices/{service}/next-order-fulfillment-dates?includeUnavailableDates=true` → per day `fulfillmentDate`, `hasCutOffTimePassed`, `closureReason`, `supplierDistributionTimeKey` | token |
 | `get_menu` | `GET /api/v2.0/suppliers/{supplier}/supplierservices/{service}/itemlist?studentKey=&dueDate=&schoolKey=` → categories → items with server-computed `inStock` for that date | **none** |
 | students, services, balance | GraphQL at `servicebff.flexischools.com.au/api/v1.0/graphql/` | token |
@@ -69,9 +71,27 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 
 **Lightpanda limitation.** Lightpanda (nightlies 11062 and 11739) can read the whole site but its `Add Item` click does not populate the cart (silent, no console error), so ordering through it fails. Real Chrome works. This is another reason the HTTP path is primary.
 
-**Timing.** Cutoff for a day is the morning of that day (the services showed "17–18 hrs left" the afternoon before), so a same-morning reminder may arrive after cutoff. An evening-before check ("nothing ordered for tomorrow") is more useful, with the morning run as a last-chance nudge. Verify the exact cutoff time.
+**Timing.** Cutoffs are exact and come from `available-services` (`cutOffTime` local, `cutOffTimeUtc`): for the Junior school here, Recess closes at **09:00** and Lunch at **09:30** (Sydney time) on the due day, with fulfilment at 10:30 / 12:30. A ~07:00 reminder on the day therefore leaves about two hours; an optional evening-before check ("nothing ordered for tomorrow") gives more notice. Cutoffs differ per service and school, so always read them from the API instead of hard-coding.
 
 **Still unknown.** Whether `POST /api/v2.0/orders` replayed over plain HTTP is accepted (not yet run; only the app's own request was captured), the option-set body shape, whether `orderRequestId` makes retries idempotent; refresh-token lifetime; the exact cutoff time per service; behaviour if Flexischools adds MFA; how/when the wallet refund appears (payment was PayPal, the app says refunds go to the wallet).
+
+## Code layout
+
+```
+src/flexischools/   the Flexischools client (no LLM, no UI)
+  auth.ts           Cognito login + refresh, tokens cached 0600 in .state/ (never logs secrets)
+  http.ts           bearer + x-channel/x-brandid headers, one retry on 401, errors carry path only
+  schemas.ts        zod schemas for each raw response; failure = API drift (FlexiError "schema")
+  normalize.ts      raw -> domain types (pure): inStock availability, price-from, active vs cancelled
+  client.ts         listStudents / listServiceSlots / getOrderDays / listOrders / getOrder / getMenu
+                    planOrder (validates + builds the exact body, sends nothing) / placeOrder / cancelOrder
+  check.ts          checkOrders: ordered | missing | missed_cutoff | no_order_day (pure)
+src/cli.ts          `npm run flexi -- <command>`; read commands, plus place/cancel as dry runs unless --yes
+test/               node:test with synthetic fixtures (fake names/ids); `npm test`, `npm run typecheck`
+spike/              throwaway discovery scripts (Lightpanda, Chrome capture); kept for reference
+```
+
+Node 24+ runs the TypeScript directly (type stripping), so there is no build step. `placeOrder` is the only function that spends money; it takes a plan from `planOrder` and verifies by reading the order back. Items with required option sets or checkout questions are refused until their request shape is captured.
 
 ## Key design decisions
 
@@ -89,7 +109,7 @@ The loop mostly waits on LLM calls and needs the DB and credentials. The sandbox
 Ordering spends money. `place_order` returns a pending approval; the chat shows an Approve button; any session member can approve. The broker enforces this, not the prompt. Read-only tools and reminders need no approval. Standing rules ("auto-order the usual Mon–Thu") come later, once trusted.
 
 ### 4. The reminder check is a routine, not a chat
-The scheduler runs a deterministic job: for each kid, call `get_order_days` (is the target day an order day, has its cutoff passed) and `list_orders` (is there already an order). The LLM is woken only if something is missing, and then only to word the reminder. The result is posted to the household session and pushed to the phone through the notifier (ntfy, Telegram or web push; a web chat cannot ping at 7am). Because cutoff is in the morning of the due day, the primary run is the evening before, with a morning last-chance nudge (see Timing above).
+The scheduler runs a deterministic job: for each kid, call `get_order_days` (is the target day an order day, has its cutoff passed) and `list_orders` (is there already an order). The LLM is woken only if something is missing, and then only to word the reminder. The result is posted to the household session and pushed to the phone through the notifier (ntfy, Telegram or web push; a web chat cannot ping at 7am). Cutoff is 09:00–09:30 local on the due day (see Timing above), so the primary run is ~07:00 that morning, with an optional evening-before run for the next day. This logic exists as the pure function `checkOrders` (`src/flexischools/check.ts`), exposed as `flexi check`.
 
 ### 5. Credentials stay in the broker
 Secrets live encrypted on the host and are delivered to the sandbox for a single task. For Flexischools the broker holds a Cognito **refresh token** and mints short-lived ID tokens; the password is needed only for the first login or after the refresh token expires. A sandbox holds no other secrets and can reach only allowlisted hosts (for Flexischools: the Cognito endpoint and `*.flexischools.com.au`; for VMs, tap device plus nftables). A prompt-injected page cannot exfiltrate data or reach the wider internet.
@@ -129,7 +149,7 @@ Either store an encrypted cookie jar in the broker or log in fresh each task. Fr
 
 1. ✅ Spikes (`spike/`): Lightpanda login and menu; API discovery; HTTP-only Cognito login with read-only calls.
 1b. ✅ Order flow captured in real Chrome (place, view upcoming, cancel). Exact `POST /api/v2.0/orders` body captured. Still to do: replay it over HTTP once (then cancel) to confirm it is accepted.
-2. CLI agent with `list_orders`, `get_order_days`, `get_menu` over HTTP and the LLM loop, no VM.
+2. ✅ Plain Flexischools client + CLI in TypeScript (`src/`, no LLM): students, services, days, orders, order, menu, check, and place/cancel (dry-run unless `--yes`). 45 unit tests. Next: the LLM loop on top of the same functions.
 3. Web chat: auth, sessions, members and kids, live fan-out.
 4. `place_order` with the approval gate.
 5. Scheduler, morning routine, push notifications.
@@ -142,5 +162,4 @@ Either store an encrypted cookie jar in the broker or log in fresh each task. Fr
 - Host language: Rust (strength, single binary, matches Firecracker work; hand-roll the Messages API client) vs. TypeScript/Python (faster agent iteration).
 - Push channel for reminders: ntfy, Telegram or web push.
 - ~~Flexischools accounts~~ Resolved: one parent login covers all kids ("students").
-- Exact cutoff time per service.
 - Cookie jar vs. fresh login for portals.

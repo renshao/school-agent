@@ -3,3 +3,4 @@
 !.env.example
 spike/out/
 node_modules/
+.state/
