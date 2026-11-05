@@ -9,7 +9,7 @@ export const log = (...a) => console.log(new Date().toISOString().slice(11, 23),
 
 export async function launch() {
   mkdirSync("out", { recursive: true });
-  const lp = spawn("lightpanda", ["serve", "--host", "127.0.0.1", "--port", String(PORT)], {
+  const lp = spawn(process.env.LIGHTPANDA_BIN || "lightpanda", ["serve", "--host", "127.0.0.1", "--port", String(PORT)], {
     stdio: ["ignore", "ignore", "ignore"],
   });
   await sleep(800);

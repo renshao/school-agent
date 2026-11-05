@@ -2,7 +2,7 @@ import { launch, login, clickText, sleep } from "./lib.mjs";
 const { page, net, close } = await launch();
 try {
   await login(page);
-  for (const s of ["Order food", "AliceExampleSchool", "Junior Recess", "Tomorrow, Fri", "Bacon, Tomato"]) await clickText(page, s);
+  for (const s of ["Order food", "Alice[\\s\\S]*ExampleSchool", "Junior Recess", "Tomorrow, Fri", "Bacon, Tomato"]) await clickText(page, s);
   const how = await page.evaluate(() => {
     const b = [...document.querySelectorAll("button")].find((x) => /^Add Item/.test(x.innerText.trim()));
     const f = b?.form ?? b?.closest("form");
