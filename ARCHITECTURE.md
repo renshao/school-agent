@@ -52,7 +52,7 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 | `list_orders` | `POST /api/v1.0/orders/order-history` `{pageIndex,pageSize,fromDate,toDate}` → `presentOrders` (today), `pastOrders`; per order: student, service, items, total, `orderState` (`Printed` = already sent to the canteen, `Closed` = past) | token |
 | `list_orders` (ranges) | same endpoint with `fromDate`/`toDate` (`YYYY-MM-DD`) filters; verified for past ranges (e.g. "yesterday" returns exactly yesterday's orders). No future-dated orders existed to observe how they are returned. | token |
 | `get_order` | `GET /api/v1.0/orders/{orderKey}` → items, `totalPrice`, `totalGst`, `orderFee`, `canCancelOrder`, `orderState`, `stateHistory[]` (`New Order` → `Placed` → `Cancelled By User`, with timestamps) | token |
-| `place_order` | `POST /api/v2.0/orders` (HTTP 200; response `{orderRequestId, orderId, orderKey, studentKey, supplierServiceKey, supplierKey, supplierName, orderPlaced, error}`). Request body not captured byte-for-byte; the app builds it from its client cart: per order `{orderRequestId (client-generated GUID), date, studentKey, supplierServiceKey, supplierKey, supplierDistributionTimeKey, orderOrigin:"Normal", orderItems:[{supplierItemKey, quantity, options, questions}]}`. **Verify the exact body before relying on it.** | token |
+| `place_order` | `POST /api/v2.0/orders` (HTTP 200; response `{orderRequestId, orderId, orderKey, studentKey, supplierServiceKey, supplierKey, supplierName, orderPlaced, error}`). **Exact request body (captured from the app, request blocked before sending):** `{"cartKey":"<guid>","totalCartAmount":6.19,"placeOrderRequests":[{"orderRequestId":"<guid>","studentKey":"…","supplierServiceKey":"…","supplierKey":"…","dueDate":"2026-11-06T10:30:00","orderAmount":5.8,"items":[{"itemKey":"…","quantity":1,"options":[],"questions":[]}],"orderOrigin":"Normal"}]}`. `totalCartAmount` = items + order fee; `orderAmount` = that order's item subtotal; `dueDate` is the service's `dueDate` from `itemlist`. The app sends `x-channel: ORDERINGPORTAL` (the user portal uses `USERPORTAL`), `x-brandid: 8`, and a per-request `x-correlation-id`. `cartKey` and `orderRequestId` look client-generated GUIDs (unverified). Options are `{optionKey, quantity}`-style entries (shape for required option sets not captured). | token |
 | `cancel_order` | `DELETE /api/v1.0/orders/{orderKey}`, request body is the orderKey string; HTTP 200, empty response. Only while `canCancelOrder` is true. Refund goes to the Flexischools **wallet**. | token |
 | `get_order_days` | `POST /api/v1.0/students/{student}/supplierservices/{service}/next-order-fulfillment-dates?includeUnavailableDates=true` → per day `fulfillmentDate`, `hasCutOffTimePassed`, `closureReason`, `supplierDistributionTimeKey` | token |
 | `get_menu` | `GET /api/v2.0/suppliers/{supplier}/supplierservices/{service}/itemlist?studentKey=&dueDate=&schoolKey=` → categories → items with server-computed `inStock` for that date | **none** |
@@ -71,7 +71,7 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 
 **Timing.** Cutoff for a day is the morning of that day (the services showed "17–18 hrs left" the afternoon before), so a same-morning reminder may arrive after cutoff. An evening-before check ("nothing ordered for tomorrow") is more useful, with the morning run as a last-chance nudge. Verify the exact cutoff time.
 
-**Still unknown.** The exact `POST /api/v2.0/orders` request body (and whether orderRequestId makes retries idempotent); refresh-token lifetime; the exact cutoff time per service; behaviour if Flexischools adds MFA; how/when the wallet refund appears (payment was PayPal, the app says refunds go to the wallet).
+**Still unknown.** Whether `POST /api/v2.0/orders` replayed over plain HTTP is accepted (not yet run; only the app's own request was captured), the option-set body shape, whether `orderRequestId` makes retries idempotent; refresh-token lifetime; the exact cutoff time per service; behaviour if Flexischools adds MFA; how/when the wallet refund appears (payment was PayPal, the app says refunds go to the wallet).
 
 ## Key design decisions
 
@@ -128,7 +128,7 @@ Either store an encrypted cookie jar in the broker or log in fresh each task. Fr
 ## Build order
 
 1. ✅ Spikes (`spike/`): Lightpanda login and menu; API discovery; HTTP-only Cognito login with read-only calls.
-1b. ✅ Order flow captured in real Chrome (place, view upcoming, cancel). Still to do: replay `POST /api/v2.0/orders` over HTTP with a cancel-after test, capturing the exact body first.
+1b. ✅ Order flow captured in real Chrome (place, view upcoming, cancel). Exact `POST /api/v2.0/orders` body captured. Still to do: replay it over HTTP once (then cancel) to confirm it is accepted.
 2. CLI agent with `list_orders`, `get_order_days`, `get_menu` over HTTP and the LLM loop, no VM.
 3. Web chat: auth, sessions, members and kids, live fan-out.
 4. `place_order` with the approval gate.
