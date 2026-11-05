@@ -26,7 +26,7 @@ function fmtOrder(o: Order): string {
 
 function fmtMenuItem(i: MenuItem): string {
   const price = i.optionSets.some((s) => s.required) ? `from ${money(i.priceFrom)}` : money(i.basePrice);
-  const opts = i.optionSets.map((s) => `${s.name}${s.required ? "*" : ""}: ${s.options.filter((o) => o.inStock).map((o) => (o.price ? `${o.name} ${money(o.price)}` : o.name)).join("/")}`).join("; ");
+  const opts = i.optionSets.map((s) => `${s.name}${s.required ? "*" : ""}: ${s.options.map((o) => `${o.name}${o.price ? ` ${money(o.price)}` : ""}${o.inStock ? "" : " (sold out)"}`).join("/")}`).join("; ");
   return `  ${i.inStock ? " " : "✗"} ${i.name}  ${price}${i.labels.length ? `  [${i.labels.join(", ")}]` : ""}${opts ? `\n      ${opts}` : ""}`;
 }
 
