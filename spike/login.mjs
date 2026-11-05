@@ -40,7 +40,7 @@ try {
   });
 
   log("goto", LOGIN_URL);
-  await page.goto(LOGIN_URL, { waitUntil: "networkidle0", timeout: 30000 });
+  await page.goto(LOGIN_URL, { waitUntil: "load", timeout: 30000 });
 
   log("fill form");
   await page.waitForSelector('input[type="password"]', { timeout: 10000 });
@@ -49,13 +49,13 @@ try {
   await page.type('input[type="password"]', pass);
 
   log("submit");
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: "networkidle0", timeout: 30000 }).catch(() => log("(no navigation event; SPA route change?)")),
-    page.evaluate(() => {
-      const btn = [...document.querySelectorAll("button")].find((b) => /log\s*in/i.test(b.textContent));
-      btn?.click();
-    }),
-  ]);
+  await page.evaluate(() => {
+    const btn = [...document.querySelectorAll("button")].find((b) => /log\s*in/i.test(b.textContent));
+    btn?.click();
+  });
+  // SPA: wait for the URL to leave /login (or give up after 20s)
+  await page.waitForFunction(() => !location.pathname.includes("/login"), { timeout: 20000 })
+    .catch(() => log("(still on /login after 20s)"));
   await sleep(2000);
 
   log("url after login:", page.url());
