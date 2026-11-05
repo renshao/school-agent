@@ -29,11 +29,24 @@ export async function launch() {
     }
   });
 
+  // Record every flexischools JSON response (url, status, body) for API discovery.
+  const net = [];
+  page.on("response", async (res) => {
+    const u = res.url();
+    if (!/flexischools\.com\.au/.test(u)) return;
+    const ct = res.headers()["content-type"] ?? "";
+    if (!/json/.test(ct)) return;
+    try {
+      const body = await res.text();
+      net.push({ method: res.request().method(), status: res.status(), url: u, req: res.request().postData(), reqHeaderNames: Object.keys(res.request().headers()), body });
+    } catch {}
+  });
+
   const close = async () => {
     try { await browser.disconnect(); } catch {}
     lp.kill();
   };
-  return { page, gql, close };
+  return { page, gql, net, close };
 }
 
 export async function login(page) {
