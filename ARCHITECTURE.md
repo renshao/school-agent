@@ -50,6 +50,7 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 | Tool | Endpoint | Auth |
 |---|---|---|
 | `list_orders` | `POST /api/v1.0/orders/order-history` `{pageIndex,pageSize,fromDate,toDate}` → `presentOrders` (today), `pastOrders`; per order: student, service, items, total, `orderState` (`Printed` = already sent to the canteen, `Closed` = past) | token |
+| `list_orders` (ranges) | same endpoint with `fromDate`/`toDate` (`YYYY-MM-DD`) filters; verified for past ranges (e.g. "yesterday" returns exactly yesterday's orders). No future-dated orders existed to observe how they are returned. | token |
 | `get_order_days` | `POST /api/v1.0/students/{student}/supplierservices/{service}/next-order-fulfillment-dates?includeUnavailableDates=true` → per day `fulfillmentDate`, `hasCutOffTimePassed`, `closureReason`, `supplierDistributionTimeKey` | token |
 | `get_menu` | `GET /api/v2.0/suppliers/{supplier}/supplierservices/{service}/itemlist?studentKey=&dueDate=&schoolKey=` → categories → items with server-computed `inStock` for that date | **none** |
 | students, services, balance | GraphQL at `servicebff.flexischools.com.au/api/v1.0/graphql/` | token |
@@ -59,7 +60,7 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 - Daily specials have `itemPrice: 0`; the real price lives in required option sets (e.g. Size: Medium/Small, `minQuantity: 1`). `place_order` must pick valid options and verify the total.
 - The student/supplier/service/school keys are GUIDs discovered through authenticated calls; cache them per kid.
 
-**Ordering UI flow** (for reference): Home → Order food → student → service (Junior Lunch/Recess/…) → date picker → items list (deep-linkable URL with `fulfillmentDate`). There is a server-side cart (`refreshCart=true`), so `place_order` must read the cart before and after. The cart/checkout calls are not yet captured.
+**Ordering UI flow** (for reference): Home → Order food → student → service (Junior Lunch/Recess/…) → date picker → items list (deep-linkable URL with `fulfillmentDate`). Selecting an item opens a dialog with required option sets (e.g. Bread Options) and an "Add Item" button, then an "Order again?" prompt offering last time's items. `Add Item` made **no write request** (only reads: `…/orders/{student}/supplierservices/{service}/orderfee` → per-order fee, e.g. $0.39 + $0.04 tax, and `…/students/{student}/orders/last-placeable-order?supplierServiceKey=` → a "reorder last" template), so the cart appears to be client-side until checkout (unconfirmed). The checkout request itself is not yet captured; `place_order` must still verify the result by reading back `order-history`.
 
 **Timing.** Cutoff for a day is the morning of that day (the services showed "17–18 hrs left" the afternoon before), so a same-morning reminder may arrive after cutoff. An evening-before check ("nothing ordered for tomorrow") is more useful, with the morning run as a last-chance nudge. Verify the exact cutoff time.
 
