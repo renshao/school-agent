@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "login": "node --env-file=../.env login.mjs",
+    "http": "node --env-file=../.env http-only.mjs",
     "explore": "node --env-file=../.env explore.mjs"
   },
   "dependencies": {

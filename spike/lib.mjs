@@ -38,7 +38,7 @@ export async function launch() {
     if (!/json/.test(ct)) return;
     try {
       const body = await res.text();
-      net.push({ method: res.request().method(), status: res.status(), url: u, req: res.request().postData(), reqHeaderNames: Object.keys(res.request().headers()), body });
+      net.push({ method: res.request().method(), status: res.status(), url: u, req: res.request().postData(), reqHeaderNames: Object.keys(res.request().headers()), xHeaders: Object.fromEntries(Object.entries(res.request().headers()).filter(([k]) => /^x-(channel|brandid)$/.test(k))), body });
     } catch {}
   });
 
