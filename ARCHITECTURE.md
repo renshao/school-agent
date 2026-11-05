@@ -51,6 +51,9 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 |---|---|---|
 | `list_orders` | `POST /api/v1.0/orders/order-history` `{pageIndex,pageSize,fromDate,toDate}` → `presentOrders` (today), `pastOrders`; per order: student, service, items, total, `orderState` (`Printed` = already sent to the canteen, `Closed` = past) | token |
 | `list_orders` (ranges) | same endpoint with `fromDate`/`toDate` (`YYYY-MM-DD`) filters; verified for past ranges (e.g. "yesterday" returns exactly yesterday's orders). No future-dated orders existed to observe how they are returned. | token |
+| `get_order` | `GET /api/v1.0/orders/{orderKey}` → items, `totalPrice`, `totalGst`, `orderFee`, `canCancelOrder`, `orderState`, `stateHistory[]` (`New Order` → `Placed` → `Cancelled By User`, with timestamps) | token |
+| `place_order` | `POST /api/v2.0/orders` (HTTP 200; response `{orderRequestId, orderId, orderKey, studentKey, supplierServiceKey, supplierKey, supplierName, orderPlaced, error}`). Request body not captured byte-for-byte; the app builds it from its client cart: per order `{orderRequestId (client-generated GUID), date, studentKey, supplierServiceKey, supplierKey, supplierDistributionTimeKey, orderOrigin:"Normal", orderItems:[{supplierItemKey, quantity, options, questions}]}`. **Verify the exact body before relying on it.** | token |
+| `cancel_order` | `DELETE /api/v1.0/orders/{orderKey}`, request body is the orderKey string; HTTP 200, empty response. Only while `canCancelOrder` is true. Refund goes to the Flexischools **wallet**. | token |
 | `get_order_days` | `POST /api/v1.0/students/{student}/supplierservices/{service}/next-order-fulfillment-dates?includeUnavailableDates=true` → per day `fulfillmentDate`, `hasCutOffTimePassed`, `closureReason`, `supplierDistributionTimeKey` | token |
 | `get_menu` | `GET /api/v2.0/suppliers/{supplier}/supplierservices/{service}/itemlist?studentKey=&dueDate=&schoolKey=` → categories → items with server-computed `inStock` for that date | **none** |
 | students, services, balance | GraphQL at `servicebff.flexischools.com.au/api/v1.0/graphql/` | token |
@@ -60,11 +63,15 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 - Daily specials have `itemPrice: 0`; the real price lives in required option sets (e.g. Size: Medium/Small, `minQuantity: 1`). `place_order` must pick valid options and verify the total.
 - The student/supplier/service/school keys are GUIDs discovered through authenticated calls; cache them per kid.
 
-**Ordering UI flow** (for reference): Home → Order food → student → service (Junior Lunch/Recess/…) → date picker → items list (deep-linkable URL with `fulfillmentDate`). Selecting an item opens a dialog with required option sets (e.g. Bread Options) and an "Add Item" button, then an "Order again?" prompt offering last time's items. `Add Item` made **no write request** (only reads: `…/orders/{student}/supplierservices/{service}/orderfee` → per-order fee, e.g. $0.39 + $0.04 tax, and `…/students/{student}/orders/last-placeable-order?supplierServiceKey=` → a "reorder last" template), so the cart appears to be client-side until checkout (unconfirmed). The checkout request itself is not yet captured; `place_order` must still verify the result by reading back `order-history`.
+**Ordering UI flow** (verified in real Chrome): Home → Order food → student → service → date → items list (deep-linkable URL with `fulfillmentDate`; an "Order again?" sheet offers last time's items) → item dialog (required option sets, quantity) → cart (`/Food/cart`, shows item, **Order Fee $0.39**, total) → Checkout → `POST /api/v2.0/orders` → confirmation. The cart is client-side only (`USER_CART_MULTI` in localStorage; `placeOrderResponse` is stored there after checkout), so there is no server cart to reconcile; `Add Item` makes no request. Order detail page: `/Food/orders/{orderKey}` with Order again / Send receipt / Cancel order (in-page confirm modal, not a native dialog).
+
+**Order lifecycle.** `orderState`: `Placed` (cancellable) → `Printed` (sent to the canteen, no longer cancellable) → `Closed`; or `CancelledByUser`. **Future-dated orders appear in `presentOrders`** (today and later, newest date first), not `pastOrders`; `orderTotal` there includes the order fee ($5.80 item → $6.19). **Cancelled orders stay in the history** with `state=CancelledByUser`, so `list_orders` consumers (e.g. the reminder check) must exclude them.
+
+**Lightpanda limitation.** Lightpanda (nightlies 11062 and 11739) can read the whole site but its `Add Item` click does not populate the cart (silent, no console error), so ordering through it fails. Real Chrome works. This is another reason the HTTP path is primary.
 
 **Timing.** Cutoff for a day is the morning of that day (the services showed "17–18 hrs left" the afternoon before), so a same-morning reminder may arrive after cutoff. An evening-before check ("nothing ordered for tomorrow") is more useful, with the morning run as a last-chance nudge. Verify the exact cutoff time.
 
-**Still unknown.** Where future-dated orders appear in `order-history` (none existed to observe); the cart and checkout calls; refresh-token lifetime; behaviour if Flexischools adds MFA.
+**Still unknown.** The exact `POST /api/v2.0/orders` request body (and whether orderRequestId makes retries idempotent); refresh-token lifetime; the exact cutoff time per service; behaviour if Flexischools adds MFA; how/when the wallet refund appears (payment was PayPal, the app says refunds go to the wallet).
 
 ## Key design decisions
 
@@ -121,7 +128,7 @@ Either store an encrypted cookie jar in the broker or log in fresh each task. Fr
 ## Build order
 
 1. ✅ Spikes (`spike/`): Lightpanda login and menu; API discovery; HTTP-only Cognito login with read-only calls.
-1b. Capture the cart/checkout calls (stop before the final pay request).
+1b. ✅ Order flow captured in real Chrome (place, view upcoming, cancel). Still to do: replay `POST /api/v2.0/orders` over HTTP with a cancel-after test, capturing the exact body first.
 2. CLI agent with `list_orders`, `get_order_days`, `get_menu` over HTTP and the LLM loop, no VM.
 3. Web chat: auth, sessions, members and kids, live fan-out.
 4. `place_order` with the approval gate.
@@ -135,5 +142,5 @@ Either store an encrypted cookie jar in the broker or log in fresh each task. Fr
 - Host language: Rust (strength, single binary, matches Firecracker work; hand-roll the Messages API client) vs. TypeScript/Python (faster agent iteration).
 - Push channel for reminders: ntfy, Telegram or web push.
 - ~~Flexischools accounts~~ Resolved: one parent login covers all kids ("students").
-- Exact cutoff time per service, and where future-dated orders appear in `order-history`.
+- Exact cutoff time per service.
 - Cookie jar vs. fresh login for portals.
