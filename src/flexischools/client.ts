@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 import { CHANNEL_ORDERING_PORTAL } from "./config.ts";
 import { FlexiError } from "./errors.ts";
+import { buildOrderItem } from "./request.ts";
 import type { FlexiHttp } from "./http.ts";
 import {
   normalizeHistory,
@@ -161,11 +162,12 @@ export class FlexiClient {
   // ---- placing and cancelling ------------------------------------------------------------------------------
 
   /**
-   * Validates an order and builds the exact request, WITHOUT sending it. Refuses anything it cannot yet build
-   * faithfully (items with required options or questions: that request shape has not been captured).
+   * Validates an order and builds the exact request, WITHOUT sending it. Each line is checked against the menu's own
+   * metadata (stock, required/min/max option sets), so any item with options is handled the same way. Items that ask
+   * questions at checkout are still refused (that request shape has not been captured).
    */
   async planOrder(input: PlaceOrderInput): Promise<OrderPlan> {
-    if (!Number.isInteger(input.quantity) || input.quantity < 1) throw new FlexiError("precondition", "Quantity must be a positive integer");
+    if (!input.lines.length) throw new FlexiError("precondition", "An order needs at least one item");
     const menu = await this.getMenu(input.student, input.service, input.date);
 
     const days = await this.getOrderDays(input.student.key, input.service.key);
@@ -173,18 +175,12 @@ export class FlexiClient {
       throw new FlexiError("precondition", `The cutoff for ${input.service.name} on ${input.date} has passed`);
     }
 
-    const item = menu.items.find((i) => i.key === input.itemKey);
-    if (!item) throw new FlexiError("not_found", `Item ${input.itemKey} is not on the ${input.service.name} menu for ${input.date}`);
-    if (!item.inStock) throw new FlexiError("precondition", `"${item.name}" is not available on ${input.date}`);
-    if (item.optionSets.some((os) => os.required)) {
-      throw new FlexiError("precondition", `"${item.name}" has required choices (${item.optionSets.filter((o) => o.required).map((o) => o.name).join(", ")}); ordering such items is not supported yet`);
-    }
-    if (item.hasQuestions) throw new FlexiError("precondition", `"${item.name}" asks questions at checkout; not supported yet`);
+    const built = input.lines.map((l) => buildOrderItem(menu, l));
 
     const feeRaw = await this.http.request("GET", `/api/v2.0/orders/${input.student.key}/supplierservices/${input.service.key}/orderfee`);
     const fee = parse(OrderFeeResponse, feeRaw, "order fee").fee;
 
-    const subtotal = round2(item.basePrice * input.quantity);
+    const subtotal = round2(built.reduce((sum, b) => sum + b.line.lineTotal, 0));
     const total = round2(subtotal + fee);
     const body: PlaceOrderBody = {
       cartKey: randomUUID(),
@@ -197,15 +193,12 @@ export class FlexiClient {
           supplierKey: input.service.supplierKey,
           dueDate: menu.dueLocal,
           orderAmount: subtotal,
-          items: [{ itemKey: item.key, quantity: input.quantity, options: [], questions: [] }],
+          items: built.map((b) => b.body),
           orderOrigin: "Normal",
         },
       ],
     };
-    return {
-      body,
-      summary: { student: input.student.firstName, service: input.service.name, date: input.date, item: item.name, quantity: input.quantity, subtotal, fee, total },
-    };
+    return { body, summary: { student: input.student.firstName, service: input.service.name, date: input.date, lines: built.map((b) => b.line), subtotal, fee, total } };
   }
 
   /**

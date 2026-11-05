@@ -158,6 +158,42 @@ export const itemListResponse = {
         mkItem("i-cheese", "Cheese Sandwich", 4.3, true, { labels: ["Vegetarian"] }),
         mkItem("i-sold", "Ham Sandwich", 5.4, false),
         mkItem("i-asks", "Custom Wrap", 6, true, { questionSets: [{ q: 1 }] }),
+        mkItem("i-ham", "Ham & Cheese Sandwich", 5.4, true, {
+          labels: ["Gluten Free Available"],
+          optionSets: [
+            {
+              optionSetKey: "os-bread",
+              name: "Bread Options",
+              minQuantity: 1,
+              maxQuantity: 1,
+              options: [
+                { optionKey: "o-white", name: "White", optionPrice: 0, inStock: true, isDefault: false },
+                { optionKey: "o-whole", name: "Wholemeal", optionPrice: 0, inStock: true, isDefault: false },
+                { optionKey: "o-gf", name: "GLUTEN FREE", optionPrice: 1, inStock: true, isDefault: false },
+              ],
+            },
+          ],
+        }),
+      ],
+    },
+    {
+      name: "Drinks",
+      items: [
+        mkItem("i-upgo", "Up & Go", 3.8, true, {
+          optionSets: [
+            {
+              optionSetKey: "os-flavour",
+              name: "Up and Go flavour",
+              minQuantity: 1,
+              maxQuantity: 1,
+              options: [
+                { optionKey: "o-van", name: "Vanilla", optionPrice: 0, inStock: false, isDefault: false }, // greyed out in the app
+                { optionKey: "o-choc", name: "Chocolate", optionPrice: 0, inStock: true, isDefault: false },
+                { optionKey: "o-straw", name: "Strawberry", optionPrice: 0, inStock: true, isDefault: false },
+              ],
+            },
+          ],
+        }),
       ],
     },
   ],

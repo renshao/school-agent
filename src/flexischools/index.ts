@@ -8,6 +8,7 @@ export { FlexiClient } from "./client.ts";
 export { FlexiHttp } from "./http.ts";
 export { FlexiError } from "./errors.ts";
 export { checkOrders } from "./check.ts";
+export { buildOrderItem, findItem, parseItemSpec, resolveLine } from "./request.ts";
 export { resolveDate, ymdInZone, addDays } from "./dates.ts";
 export type * from "./types.ts";
 export type { CheckRow, CheckStatus } from "./check.ts";

@@ -52,7 +52,7 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 | `list_orders` | `POST /api/v1.0/orders/order-history` `{pageIndex,pageSize,fromDate,toDate}` → `presentOrders` (today), `pastOrders`; per order: student, service, items, total, `orderState` (`Printed` = already sent to the canteen, `Closed` = past) | token |
 | `list_orders` (ranges) | same endpoint with `fromDate`/`toDate` (`YYYY-MM-DD`) filters; verified for past ranges (e.g. "yesterday" returns exactly yesterday's orders). No future-dated orders existed to observe how they are returned. | token |
 | `get_order` | `GET /api/v1.0/orders/{orderKey}` → items, `totalPrice`, `totalGst`, `orderFee`, `canCancelOrder`, `orderState`, `stateHistory[]` (`New Order` → `Placed` → `Cancelled By User`, with timestamps) | token |
-| `place_order` | `POST /api/v2.0/orders` (HTTP 200; response `{orderRequestId, orderId, orderKey, studentKey, supplierServiceKey, supplierKey, supplierName, orderPlaced, error}`). **Exact request body (captured from the app, request blocked before sending):** `{"cartKey":"<guid>","totalCartAmount":6.19,"placeOrderRequests":[{"orderRequestId":"<guid>","studentKey":"…","supplierServiceKey":"…","supplierKey":"…","dueDate":"2026-11-06T10:30:00","orderAmount":5.8,"items":[{"itemKey":"…","quantity":1,"options":[],"questions":[]}],"orderOrigin":"Normal"}]}`. `totalCartAmount` = items + order fee; `orderAmount` = that order's item subtotal; `dueDate` is the service's `dueDate` from `itemlist`. The app sends `x-channel: ORDERINGPORTAL` (the user portal uses `USERPORTAL`), `x-brandid: 8`, and a per-request `x-correlation-id`. `cartKey` and `orderRequestId` look client-generated GUIDs (unverified). Options are `{optionKey, quantity}`-style entries (shape for required option sets not captured). | token |
+| `place_order` | `POST /api/v2.0/orders` (HTTP 200; response `{orderRequestId, orderId, orderKey, studentKey, supplierServiceKey, supplierKey, supplierName, orderPlaced, error}`). **Exact request body (captured from the app, request blocked before sending):** `{"cartKey":"<guid>","totalCartAmount":6.19,"placeOrderRequests":[{"orderRequestId":"<guid>","studentKey":"…","supplierServiceKey":"…","supplierKey":"…","dueDate":"2026-11-06T10:30:00","orderAmount":5.8,"items":[{"itemKey":"…","quantity":1,"options":[],"questions":[]}],"orderOrigin":"Normal"}]}`. `totalCartAmount` = items + order fee; `orderAmount` = that order's item subtotal; `dueDate` is the service's `dueDate` from `itemlist`. The app sends `x-channel: ORDERINGPORTAL` (the user portal uses `USERPORTAL`), `x-brandid: 8`, and a per-request `x-correlation-id`. `cartKey` and `orderRequestId` look client-generated GUIDs (unverified). Chosen options go in each item's `options` as `{"optionKey":"…","quantity":1,"isExcluded":false,"isDefault":<the menu option's isDefault>}` (captured with Up & Go [flavour] and Ham & Cheese Sandwich [bread, GLUTEN FREE +$1]); an option's price is added into the line, so `orderAmount` = Σ (item price + chosen option prices) and `totalCartAmount` = `orderAmount` + order fee. One order can hold several items. Sold-out options (`inStock:false`, greyed out in the app) must not be sent. | token |
 | `cancel_order` | `DELETE /api/v1.0/orders/{orderKey}`, request body is the orderKey string; HTTP 200, empty response. Only while `canCancelOrder` is true. Refund goes to the Flexischools **wallet**. | token |
 | `list_students` | `GET /api/v2.0/service-categories/1/students` → each student with `schoolKey`, `schoolSiteKey` and their `services[]` (service key, supplier key, site keys). One parent login covers all kids. | token |
 | `list_service_slots` | `POST /api/v1.0/available-services` with the student's services (each plus `schoolKey`, `schoolSiteKey`) → per service the **exact cutoff** (`cutOffTime` local, `cutOffTimeUtc`), `nextOrderFulfillmentDate`, `supplierDistributionTimeKey` | token |
@@ -73,7 +73,7 @@ Flexischools (Australia) is a React + GraphQL SPA, but everything the lunch flow
 
 **Timing.** Cutoffs are exact and come from `available-services` (`cutOffTime` local, `cutOffTimeUtc`): for the Junior school here, Recess closes at **09:00** and Lunch at **09:30** (Sydney time) on the due day, with fulfilment at 10:30 / 12:30. A ~07:00 reminder on the day therefore leaves about two hours; an optional evening-before check ("nothing ordered for tomorrow") gives more notice. Cutoffs differ per service and school, so always read them from the API instead of hard-coding.
 
-**Still unknown.** Whether `POST /api/v2.0/orders` replayed over plain HTTP is accepted (not yet run; only the app's own request was captured), the option-set body shape, whether `orderRequestId` makes retries idempotent; refresh-token lifetime; the exact cutoff time per service; behaviour if Flexischools adds MFA; how/when the wallet refund appears (payment was PayPal, the app says refunds go to the wallet).
+**Still unknown.** Whether `POST /api/v2.0/orders` replayed over plain HTTP is accepted (not yet run; only the app's own request was captured), whether option prices multiply with quantity > 1 (assumed, not observed), items that ask questions at checkout (`questionSets`; request shape not captured), whether `orderRequestId` makes retries idempotent; refresh-token lifetime; the exact cutoff time per service; behaviour if Flexischools adds MFA; how/when the wallet refund appears (payment was PayPal, the app says refunds go to the wallet).
 
 ## Code layout
 
@@ -85,13 +85,15 @@ src/flexischools/   the Flexischools client (no LLM, no UI)
   normalize.ts      raw -> domain types (pure): inStock availability, price-from, active vs cancelled
   client.ts         listStudents / listServiceSlots / getOrderDays / listOrders / getOrder / getMenu
                     planOrder (validates + builds the exact body, sends nothing) / placeOrder / cancelOrder
+  request.ts        by-name requests -> keys (parseItemSpec/resolveLine) and generic option-set validation + pricing
+                    (buildOrderItem: stock, required/min/max, sold-out options with alternatives) (pure)
   check.ts          checkOrders: ordered | missing | missed_cutoff | no_order_day (pure)
 src/cli.ts          `npm run flexi -- <command>`; read commands, plus place/cancel as dry runs unless --yes
 test/               node:test with synthetic fixtures (fake names/ids); `npm test`, `npm run typecheck`
 spike/              throwaway discovery scripts (Lightpanda, Chrome capture); kept for reference
 ```
 
-Node 24+ runs the TypeScript directly (type stripping), so there is no build step. `placeOrder` is the only function that spends money; it takes a plan from `planOrder` and verifies by reading the order back. Items with required option sets or checkout questions are refused until their request shape is captured.
+Node 24+ runs the TypeScript directly (type stripping), so there is no build step. `placeOrder` is the only function that spends money; it takes a plan from `planOrder` and verifies by reading the order back. Option sets are handled generically from the menu's own metadata, so flavours, breads and sizes share one code path; only items with checkout questions are still refused.
 
 ## Key design decisions
 
@@ -149,7 +151,7 @@ Either store an encrypted cookie jar in the broker or log in fresh each task. Fr
 
 1. ✅ Spikes (`spike/`): Lightpanda login and menu; API discovery; HTTP-only Cognito login with read-only calls.
 1b. ✅ Order flow captured in real Chrome (place, view upcoming, cancel). Exact `POST /api/v2.0/orders` body captured. Still to do: replay it over HTTP once (then cancel) to confirm it is accepted.
-2. ✅ Plain Flexischools client + CLI in TypeScript (`src/`, no LLM): students, services, days, orders, order, menu, check, and place/cancel (dry-run unless `--yes`). 45 unit tests. Next: the LLM loop on top of the same functions.
+2. ✅ Plain Flexischools client + CLI in TypeScript (`src/`, no LLM): students, services, days, orders, order, menu, check, and place/cancel (dry-run unless `--yes`). 68 unit tests, including a two-item order with options that matches the body captured from the app. Next: the LLM loop on top of the same functions.
 3. Web chat: auth, sessions, members and kids, live fan-out.
 4. `place_order` with the approval gate.
 5. Scheduler, morning routine, push notifications.

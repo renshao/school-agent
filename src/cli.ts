@@ -1,7 +1,7 @@
 // Plain command-line interface to Flexischools (no LLM). Usage: npm run flexi -- <command> [args]
 import { parseArgs } from "node:util";
-import { checkOrders, createFlexiClient, FlexiClient, FlexiError, resolveDate } from "./flexischools/index.ts";
-import type { CheckRow, Menu, MenuItem, Order, OrderDetail, OrderDay, Student } from "./flexischools/index.ts";
+import { checkOrders, createFlexiClient, FlexiClient, FlexiError, parseItemSpec, resolveDate, resolveLine } from "./flexischools/index.ts";
+import type { CheckRow, MenuItem, Order, OrderDetail, OrderDay, Student } from "./flexischools/index.ts";
 
 const USAGE = `flexi: Flexischools from the command line
 
@@ -12,7 +12,8 @@ const USAGE = `flexi: Flexischools from the command line
   order <orderKey>                      One order with its state history
   menu <student> <service> <date> [--all]              Menu (in-stock only unless --all)
   check [--date D] [--student S] [--service RE]        Is lunch ordered? exit 1 if something is missing
-  place <student> <service> <date> <item> [--qty N] [--yes]   Place an order (dry run unless --yes)
+  place <student> <service> <date> <item>... [--yes]   Place an order (dry run unless --yes)
+        item: "Name [Option; Set=Option] xN", e.g. "Up & Go [Chocolate]" "Ham & Cheese Sandwich [Bread Options=GLUTEN FREE] x2"
   cancel <orderKey> [--yes]             Cancel an order (dry run unless --yes)
 
   --json   machine-readable output for read commands`;
@@ -47,17 +48,6 @@ function print(json: boolean, data: unknown, text: string): void {
   console.log(json ? JSON.stringify(data, null, 2) : text);
 }
 
-async function pickItem(menu: Menu, query: string): Promise<MenuItem> {
-  const q = query.trim().toLowerCase();
-  const avail = menu.items.filter((i) => i.inStock);
-  const exact = avail.filter((i) => i.name.toLowerCase() === q);
-  const hits = exact.length ? exact : avail.filter((i) => i.name.toLowerCase().includes(q));
-  if (hits.length !== 1) {
-    throw new FlexiError("not_found", `${hits.length ? "Ambiguous" : "No in-stock"} item "${query}"${hits.length ? `: ${hits.map((h) => h.name).join(", ")}` : ""}`);
-  }
-  return hits[0]!;
-}
-
 async function main(): Promise<number> {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -70,7 +60,6 @@ async function main(): Promise<number> {
       to: { type: "string" },
       date: { type: "string" },
       service: { type: "string" },
-      qty: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -151,15 +140,17 @@ async function main(): Promise<number> {
       return rows.some((r) => r.status === "missing" || r.status === "missed_cutoff") ? 1 : 0;
     }
     case "place": {
-      need(4, "<student> <service> <date> <item>");
+      need(4, "<student> <service> <date> <item>...");
       const student = await client.findStudent(args[0]!);
       const service = FlexiClient.findService(student, args[1]!);
       const date = resolveDate(args[2]!);
       const menu = await client.getMenu(student, service, date);
-      const item = await pickItem(menu, args.slice(3).join(" "));
-      const plan = await client.planOrder({ student, service, date, itemKey: item.key, quantity: Number(values.qty ?? 1) });
+      const lines = args.slice(3).map((spec) => resolveLine(menu, parseItemSpec(spec)));
+      const plan = await client.planOrder({ student, service, date, lines });
       const s = plan.summary;
-      console.log(`${s.student} · ${s.service} · ${s.date}\n  ${s.quantity} x ${s.item}  ${money(s.subtotal)} + fee ${money(s.fee)} = ${money(s.total)}`);
+      console.log(`${s.student} · ${s.service} · ${s.date}`);
+      for (const l of s.lines) console.log(`  ${l.quantity} x ${l.item}${l.options.length ? ` (${l.options.join(", ")})` : ""}  ${money(l.lineTotal)}`);
+      console.log(`  items ${money(s.subtotal)} + fee ${money(s.fee)} = ${money(s.total)}`);
       if (!values.yes) {
         console.log("\nDRY RUN: nothing sent. Re-run with --yes to place this order (charges your account).");
         return 0;

@@ -90,7 +90,7 @@ describe("getMenu", () => {
     const { client, calls } = setup();
     const { student, lunch } = await alice(client);
     const menu = await client.getMenu(student, lunch, "2026-11-06");
-    assert.equal(menu.items.length, 6);
+    assert.equal(menu.items.length, 8);
     const c = calls.find((x) => /itemlist/.test(x.url.pathname))!;
     assert.equal(c.headers.authorization, undefined);
     assert.equal(c.url.searchParams.get("dueDate"), "2026-11-06T12:30:00");
@@ -110,9 +110,17 @@ describe("planOrder (builds the request, sends nothing)", () => {
   it("builds the exact body the web app sends, with total = items + fee", async () => {
     const { client, calls } = setup();
     const { student, lunch } = await alice(client);
-    const plan = await client.planOrder({ student, service: lunch, date: "2026-11-06", itemKey: "i-cheese", quantity: 2 });
+    const plan = await client.planOrder({ student, service: lunch, date: "2026-11-06", lines: [{ itemKey: "i-cheese", quantity: 2, optionKeys: [] }] });
 
-    assert.deepEqual(plan.summary, { student: "Alice", service: "Junior Lunch", date: "2026-11-06", item: "Cheese Sandwich", quantity: 2, subtotal: 8.6, fee: 0.39, total: 8.99 });
+    assert.deepEqual(plan.summary, {
+      student: "Alice",
+      service: "Junior Lunch",
+      date: "2026-11-06",
+      lines: [{ item: "Cheese Sandwich", quantity: 2, options: [], unitPrice: 4.3, lineTotal: 8.6 }],
+      subtotal: 8.6,
+      fee: 0.39,
+      total: 8.99,
+    });
     const { cartKey, placeOrderRequests, totalCartAmount } = plan.body;
     assert.equal(totalCartAmount, 8.99);
     assert.match(cartKey, /^[0-9a-f-]{36}$/);
@@ -132,18 +140,44 @@ describe("planOrder (builds the request, sends nothing)", () => {
     assert.equal(calls.filter((c) => c.method === "POST" && /\/api\/v2\.0\/orders$/.test(c.url.pathname)).length, 0, "planning must not place anything");
   });
 
+  it("builds the same body shape the web app sent for a two-item order with options (captured in Chrome)", async () => {
+    const { client } = setup();
+    const { student, lunch } = await alice(client);
+    // Up & Go (Chocolate) $3.80 + Ham & Cheese (GLUTEN FREE +$1) $6.40, fee $0.39 -> $10.59 in the real capture.
+    const plan = await client.planOrder({
+      student,
+      service: lunch,
+      date: "2026-11-06",
+      lines: [
+        { itemKey: "i-upgo", quantity: 1, optionKeys: ["o-choc"] },
+        { itemKey: "i-ham", quantity: 1, optionKeys: ["o-gf"] },
+      ],
+    });
+    assert.equal(plan.body.totalCartAmount, 10.59);
+    const r = plan.body.placeOrderRequests[0]!;
+    assert.equal(r.orderAmount, 10.2);
+    assert.deepEqual(r.items, [
+      { itemKey: "i-upgo", quantity: 1, options: [{ optionKey: "o-choc", quantity: 1, isExcluded: false, isDefault: false }], questions: [] },
+      { itemKey: "i-ham", quantity: 1, options: [{ optionKey: "o-gf", quantity: 1, isExcluded: false, isDefault: false }], questions: [] },
+    ]);
+    assert.deepEqual(plan.summary.lines.map((l) => [l.item, l.options, l.lineTotal]), [["Up & Go", ["Chocolate"], 3.8], ["Ham & Cheese Sandwich", ["GLUTEN FREE"], 6.4]]);
+  });
+
   it("refuses what it cannot do faithfully", async () => {
     const { client } = setup();
     const { student, lunch } = await alice(client);
-    const plan = (itemKey: string, date = "2026-11-06", quantity = 1) => client.planOrder({ student, service: lunch, date, itemKey, quantity });
+    const plan = (itemKey: string, optionKeys: string[] = [], date = "2026-11-06", quantity = 1) =>
+      client.planOrder({ student, service: lunch, date, lines: [{ itemKey, quantity, optionKeys }] });
     await assert.rejects(plan("i-sold"), /not available/);
     await assert.rejects(plan("i-offweek"), /not available/);
-    await assert.rejects(plan("i-pasta"), /required choices \(Size\)/);
+    await assert.rejects(plan("i-pasta"), /needs a choice for "Size"/);
+    await assert.rejects(plan("i-upgo", ["o-van"]), /Vanilla" is sold out \(available: Chocolate, Strawberry\)/);
     await assert.rejects(plan("i-asks"), /asks questions/);
     await assert.rejects(plan("i-nope"), (e: unknown) => e instanceof FlexiError && e.kind === "not_found");
-    await assert.rejects(plan("i-cheese", "2026-11-05"), /cutoff.*has passed/);
-    await assert.rejects(plan("i-cheese", "2026-11-06", 0), /Quantity/);
-    await assert.rejects(plan("i-cheese", "2026-11-06", 1.5), /Quantity/);
+    await assert.rejects(plan("i-cheese", [], "2026-11-05"), /cutoff.*has passed/);
+    await assert.rejects(plan("i-cheese", [], "2026-11-06", 0), /Quantity/);
+    await assert.rejects(plan("i-cheese", [], "2026-11-06", 1.5), /Quantity/);
+    await assert.rejects(client.planOrder({ student, service: lunch, date: "2026-11-06", lines: [] }), /at least one item/);
   });
 });
 
@@ -153,7 +187,7 @@ describe("placeOrder", () => {
     const detail = route("GET", /\/api\/v1\.0\/orders\/ord-new$/, () => json(orderDetailResponse("Placed", true)));
     const { client, calls } = setup(place, detail);
     const { student, lunch } = await alice(client);
-    const plan = await client.planOrder({ student, service: lunch, date: "2026-11-06", itemKey: "i-cheese", quantity: 1 });
+    const plan = await client.planOrder({ student, service: lunch, date: "2026-11-06", lines: [{ itemKey: "i-cheese", quantity: 1, optionKeys: [] }] });
 
     const placed = await client.placeOrder(plan);
     assert.equal(placed.state, "Placed");
@@ -170,7 +204,7 @@ describe("placeOrder", () => {
       ["dead", [route("POST", /\/api\/v2\.0\/orders$/, () => json(placeOrderResponse)), route("GET", /orders\/ord-new$/, () => json(orderDetailResponse("CancelledByUser", false)))], /CancelledByUser/],
     ] as const) {
       const { client } = setup(...handlers);
-      const plan = await client.planOrder({ student, service: lunch, date: "2026-11-06", itemKey: "i-cheese", quantity: 1 });
+      const plan = await client.planOrder({ student, service: lunch, date: "2026-11-06", lines: [{ itemKey: "i-cheese", quantity: 1, optionKeys: [] }] });
       await assert.rejects(client.placeOrder(plan), expected, label);
     }
   });

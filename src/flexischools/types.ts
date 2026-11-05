@@ -109,13 +109,37 @@ export interface Menu {
   items: MenuItem[];
 }
 
+/** What a caller (CLI or, later, the LLM) asks for, by name. Resolved against the menu into an OrderLine. */
+export interface ItemRequest {
+  /** Item name (case-insensitive; exact match preferred, else a unique substring). */
+  item: string;
+  quantity?: number;
+  /** Option choices by name. `set` is optional when the option name is unique across the item's option sets. */
+  choices?: { set?: string; option: string }[];
+}
+
+/** A resolved line: item and chosen options by key. */
+export interface OrderLine {
+  itemKey: string;
+  quantity: number;
+  optionKeys: string[];
+}
+
 export interface PlaceOrderInput {
   student: Student;
   service: Service;
   /** YYYY-MM-DD */
   date: string;
-  itemKey: string;
+  /** One order may hold several items (the web cart does). */
+  lines: OrderLine[];
+}
+
+export interface PlaceOrderOption {
+  optionKey: string;
   quantity: number;
+  isExcluded: boolean;
+  /** Whether this option is the item's default option (from the menu). */
+  isDefault: boolean;
 }
 
 /** Exact body of POST /api/v2.0/orders as the web app sends it. */
@@ -129,9 +153,19 @@ export interface PlaceOrderBody {
     supplierKey: string;
     dueDate: string;
     orderAmount: number;
-    items: { itemKey: string; quantity: number; options: never[]; questions: never[] }[];
+    items: { itemKey: string; quantity: number; options: PlaceOrderOption[]; questions: never[] }[];
     orderOrigin: "Normal";
   }[];
+}
+
+export interface PlanLine {
+  item: string;
+  quantity: number;
+  /** Chosen option names, e.g. ["Chocolate"]. */
+  options: string[];
+  /** Price of one unit including chosen options. */
+  unitPrice: number;
+  lineTotal: number;
 }
 
 export interface OrderPlan {
@@ -140,8 +174,7 @@ export interface OrderPlan {
     student: string;
     service: string;
     date: string;
-    item: string;
-    quantity: number;
+    lines: PlanLine[];
     subtotal: number;
     fee: number;
     total: number;
