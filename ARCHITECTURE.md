@@ -90,6 +90,9 @@ src/flexischools/   the Flexischools client (no LLM, no UI)
   request.ts        by-name requests -> keys (parseItemSpec/resolveLine) and generic option-set validation + pricing
                     (buildOrderItem: stock, required/min/max, sold-out options with alternatives) (pure)
   check.ts          checkOrders: ordered | missing | missed_cutoff | no_order_day (pure)
+src/agent/          the LLM loop (SDK tool runner): tools.ts (typed tools over the client), approvals.ts (ApprovalDesk:
+                    proposals that only a human approval executes), agent.ts (turns, history, host approve/reject)
+src/chat.ts         `npm run chat`: terminal stand-in for the web chat, including the approval prompt
 src/cli.ts          `npm run flexi -- <command>`; read commands, plus place/cancel as dry runs unless --yes
 test/               node:test with synthetic fixtures (fake names/ids); `npm test`, `npm run typecheck`
 spike/              throwaway discovery scripts (Lightpanda, Chrome capture); kept for reference
@@ -154,8 +157,9 @@ Either store an encrypted cookie jar in the broker or log in fresh each task. Fr
 1. ✅ Spikes (`spike/`): Lightpanda login and menu; API discovery; HTTP-only Cognito login with read-only calls.
 1b. ✅ Order flow captured in real Chrome (place, view upcoming, cancel). Exact `POST /api/v2.0/orders` body captured, then **verified over plain HTTP with no browser**: this client placed an Up & Go (Chocolate) order for tomorrow ($4.19) and cancelled it 47 s later (state history New Order → Placed → Cancelled By User).
 2. ✅ Plain Flexischools client + CLI in TypeScript (`src/`, no LLM): students, services, days, orders, order, menu, check, and place/cancel (dry-run unless `--yes`). 74 unit tests, including a two-item order with options that matches the body captured from the app. Next: the LLM loop on top of the same functions.
-3. Web chat: auth, sessions, members and kids, live fan-out.
-4. `place_order` with the approval gate.
+2b. ✅ LLM agent loop (`src/agent/`, `npm run chat`) with the approval gate: the model proposes (`plan_order` / `plan_cancel`), only a human approval executes, re-validated at approval time. 96 tests.
+3. Web chat: auth, sessions, members and kids, live fan-out (Web Push for notifications).
+4. ~~`place_order` with the approval gate.~~ Done in 2b.
 5. Scheduler, morning routine, push notifications.
 6. Move the runner into Firecracker with the egress allowlist; deploy to the server.
 7. `browse-full` profile with PDF render (forces the artifact store).

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { z } from "zod";
+import { checkOrders } from "./check.ts";
+import type { CheckRow } from "./check.ts";
 import { CHANNEL_ORDERING_PORTAL } from "./config.ts";
 import { datePart } from "./dates.ts";
 import { FlexiError } from "./errors.ts";
@@ -173,6 +175,22 @@ export class FlexiClient {
     return normalizeOrderDetail(parse(OrderDetailResponse, raw, "order"));
   }
 
+  /**
+   * Fetches what checkOrders needs for one date and runs it: is each matching service ordered, missing, past its
+   * cutoff, or not an order day? Used by `flexi check`, the agent's check_orders tool, and (later) the scheduler.
+   */
+  async checkDay(opts: { date: string; students?: Student[]; serviceMatch: RegExp; now: Date }): Promise<CheckRow[]> {
+    const students = opts.students ?? (await this.listStudents());
+    const orders = await this.listOrders({ from: opts.date, to: opts.date, includeInactive: true });
+    const daysByService = new Map<string, OrderDay[]>();
+    const slotsByStudent = new Map<string, ServiceSlot[]>();
+    for (const s of students) {
+      slotsByStudent.set(s.key, await this.listServiceSlots(s));
+      for (const v of s.services.filter((v) => opts.serviceMatch.test(v.name))) daysByService.set(`${s.key}:${v.key}`, await this.getOrderDays(s.key, v.key));
+    }
+    return checkOrders({ date: opts.date, students, orders, daysByService, slotsByStudent, serviceMatch: opts.serviceMatch, now: opts.now });
+  }
+
   // ---- menu ------------------------------------------------------------------------------------------------
 
   /** Menu for one service on one date. Errors if that date is not an order day. */
@@ -255,7 +273,7 @@ export class FlexiClient {
     } catch (e) {
       if (e instanceof FlexiError) throw e; // an HTTP error status: the request was refused
       // Network-level failure after sending: the outcome is unknown.
-      throw new FlexiError("http", `Connection failed while placing the order; it MAY have been placed. Run "flexi orders --from ${date} --to ${date}" before retrying.`);
+      throw new FlexiError("outcome_unknown", `Connection failed while placing the order; it MAY have been placed. Run "flexi orders --from ${date} --to ${date}" before retrying.`);
     }
 
     const found = findPlaceResult(raw, req.orderRequestId);
@@ -268,7 +286,7 @@ export class FlexiClient {
       if (fresh.length === 1) orderKey = fresh[0]!.key;
       else {
         throw new FlexiError(
-          "http",
+          "outcome_unknown",
           `The order request was accepted but its result could not be confirmed (response: ${describeShape(raw)}). It MAY have been placed: run "flexi orders --from ${date} --to ${date}" before retrying.`,
         );
       }

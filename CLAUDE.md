@@ -8,9 +8,10 @@ Done and verified against the live Flexischools account:
 - **`src/flexischools/`**: a complete, tested client (no LLM, no UI): login/refresh, students, services and exact cutoffs, order days, menu, order list/detail, `planOrder` / `placeOrder` / `cancelOrder`, and the pure reminder logic `checkOrders`.
 - **`src/cli.ts`**: `npm run flexi -- <command>` (students, services, days, orders, order, menu, check, place, cancel). `place` and `cancel` are dry runs unless `--yes`.
 - **Verified over plain HTTP with no browser**: real placement and cancellation of an order (Up & Go [Chocolate], $4.19, placed then cancelled).
-- **74 tests** (`npm test`), typecheck clean (`npm run typecheck`). Node 24+ runs the `.ts` directly: no build step.
+- **`src/agent/`**: the LLM agent loop (2026-11-05): SDK tool runner over 10 typed tools, a host-side approval desk, a terminal chat (`npm run chat`). Smoke-tested live (read-only question, real data).
+- **96 tests** (`npm test`), typecheck clean (`npm run typecheck`). Node 24+ runs the `.ts` directly: no build step.
 
-**Not built yet (the next session's job): the LLM agent loop, the web chat, sessions/memory, the scheduler/reminders, the sandbox/Firecracker work.** See "Next" below.
+**Not built yet: the web chat, persistent sessions (SQLite) and memory, the scheduler/reminders, the sandbox/Firecracker work.** See "Next" below.
 
 ## Run it
 
@@ -20,8 +21,10 @@ npm run flexi -- students
 npm run flexi -- check --date tomorrow              # exit 1 if lunch is missing
 npm run flexi -- menu Alice "Junior Recess" tomorrow
 npm run flexi -- place Alice recess tomorrow "Up & Go [Chocolate]"       # dry run
+npm run chat -- --user Ren                          # chat with the agent (needs ANTHROPIC_API_KEY in .env)
 npm test && npm run typecheck
 ```
+Agent env overrides: `AGENT_MODEL` (default `claude-opus-5-5`), `AGENT_EFFORT` (default `medium`), `SCHOOL_AGENT_USER`. Each chat session logs every event to `.state/sessions/<id>.jsonl`.
 Tokens are cached in `.state/flexischools-tokens.json` (0600, gitignored). Names are matched by first name / service substring.
 
 ## Hard rules (money and safety)
@@ -46,7 +49,9 @@ Tokens are cached in `.state/flexischools-tokens.json` (0600, gitignored). Names
 
 ```
 src/flexischools/  auth.ts http.ts schemas.ts normalize.ts client.ts request.ts check.ts dates.ts types.ts index.ts
+src/agent/         agent.ts (loop, turns, host approve/reject) tools.ts (the model's tools) approvals.ts (ApprovalDesk) prompt.ts log.ts
 src/cli.ts         the plain CLI
+src/chat.ts        terminal chat: the human approval UI (y/n per proposal, /approve, /reject, /pending, /usage)
 test/              node:test, synthetic fixtures (fixtures.ts, helpers.ts)
 spike/             throwaway discovery scripts (Lightpanda login/menu, Chrome capture); reference only
 ```
@@ -62,17 +67,26 @@ spike/             throwaway discovery scripts (Lightpanda login/menu, Chrome ca
 - Unverified: option prices with quantity > 1 (assumed to multiply); items with `questionSets` (checkout questions) are refused because their request shape was never captured.
 - The Flexischools API is undocumented and its terms were not reviewed; keep the browser path as a fallback and keep schema/fixture tests current.
 
-## Next: the agent loop (decisions already made)
+## The agent loop (built; how it works)
 
-Language/stack: **TypeScript** (official `@anthropic-ai/sdk`; the Tool Runner with `betaZodTool` + zod fits the existing schemas). Needs an Anthropic API key (`ANTHROPIC_API_KEY` or `ant auth login`). Model: the claude-api skill defaults to Opus 5.5; for a tool-calling household agent a cheaper tier may be enough, so decide by testing on real conversations. Architecture intent (full version in `ARCHITECTURE.md`):
+- **Tool runner** (`client.beta.messages.toolRunner`, `betaZodTool`), `thread: false`: `Agent` owns the append-only history (each reply verbatim, thinking blocks included, then its tool results via the runner's cached `generateToolResponse()`). One runner per user turn, `max_iterations` 12. Turns are serialized per `Agent`.
+- **Request:** `claude-opus-5-5`, effort `medium`, no `thinking` param (Opus 5.5 always thinks; disabling is a 400), top-level `cache_control` (auto caching), `fallbacks: "default"` + beta `server-side-fallback-2026-07-01` (server-side refusal fallback). The system prompt is byte-stable; the time and the speaker go in a header on each user turn (`[Fri, 6 Nov 2026, 07:00 · Ren]`).
+- **Tools:** list_students, list_service_slots, get_order_days, list_orders, get_order, get_menu, check_orders, plan_order, plan_cancel, list_proposals. They return compact JSON with no internal keys except `order_key`. Tool errors (FlexiError messages, zod validation) go back as `is_error` results.
+- **Approval gate = approval executes.** There is no place/cancel tool at all. `plan_order`/`plan_cancel` store a proposal (`P1`, ...) in `ApprovalDesk`; only `Agent.approve(id, human)` (from the chat UI) executes it. Approval re-plans and refuses ("stale") if items/total changed or it became invalid; expires after 30 min; executes at most once; an unconfirmed result is `unknown` (FlexiError kind `outcome_unknown`) and is never retried. The outcome reaches the model as a `[host event]` text block on the next user turn. Proposals are in memory only (lost on restart, which is the safe direction).
+- Tests guard this with mutation checks (`test/approvals.test.ts`, `test/agent.test.ts`, fake Messages API in the latter).
+- Known rough edge: in `npm run chat`, a line typed while a turn is running is dropped (readline has no pending question).
 
-1. **Tools = thin wrappers over `FlexiClient`**, never a raw browse/shell tool: list_students, list_service_slots, list_orders, get_order, get_menu (return normalized, already-filtered data, not raw JSON), check_orders, plan_order, place_order, cancel_order.
-2. **Approval gate outside the model.** `plan_order` stores the plan server-side and returns a plan id + summary; chat shows an Approve button; **only a human approval event** lets `place_order`/`cancel_order` execute. The host enforces this, not the prompt. Read-only tools and reminders need no approval.
+## Next (decisions already made)
+
+Model: Opus 5.5 at medium effort for now; a cheaper tier or lower effort may be enough, so decide by testing on real conversations (`/usage` and the session logs show the cost). Remaining architecture intent (full version in `ARCHITECTURE.md`):
+
+1. Tools stay thin wrappers over `FlexiClient`, never a raw browse/shell tool. (Done.)
+2. Approval gate outside the model. (Done, see above; the web chat's Approve button must call `Agent.approve`, never anything the model can trigger.)
 3. **Session model:** a session has many users and many kids; an append-only event log (messages, tool calls/results, approvals) with authorship; turns serialized per session; memory scoped kid / household / user. SQLite (WAL) on the host.
 4. **Reminder routine is deterministic, not a chat:** scheduler calls `checkOrders`; the LLM is only used to word the reminder when something is `missing`. Primary run about 07:00 on the day (cutoffs 09:00/09:30), optional evening-before run. Needs a push channel (ntfy / Telegram / web push; undecided).
 5. Later: web chat (multi-user, live fan-out via WebSocket/SSE), then the sandbox work (Firecracker for Chromium/ffmpeg tasks: portal login, video download, HTML to PDF). The Flexischools HTTP client itself needs only an egress-limited process, not a VM. Firecracker needs `/dev/kvm` (DigitalOcean droplets likely lack it; DO's managed MicroVMs product is an alternative; Macs cannot run it, so keep the sandbox behind an interface).
 
-Open questions for Ren: push channel for reminders; which model tier; whether to build the web chat before or after the reminder loop.
+Open questions for Ren: push channel for reminders (Web Push from the web chat is the leading candidate: service worker + VAPID via `web-push`; iOS only delivers it to a Home-Screen PWA, iOS 16.4+; notification actions should open the pending proposal, not approve it); which model tier; whether to build the web chat before or after the reminder loop.
 
 ## Conventions
 

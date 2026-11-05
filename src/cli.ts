@@ -1,6 +1,6 @@
 // Plain command-line interface to Flexischools (no LLM). Usage: npm run flexi -- <command> [args]
 import { parseArgs } from "node:util";
-import { checkOrders, createFlexiClient, FlexiClient, FlexiError, parseItemSpec, resolveDate, resolveLine } from "./flexischools/index.ts";
+import { createFlexiClient, FlexiClient, FlexiError, parseItemSpec, resolveDate, resolveLine } from "./flexischools/index.ts";
 import type { CheckRow, MenuItem, Order, OrderDetail, OrderDay, Student } from "./flexischools/index.ts";
 
 const USAGE = `flexi: Flexischools from the command line
@@ -125,17 +125,9 @@ async function main(): Promise<number> {
     case "check": {
       const now = new Date();
       const date = resolveDate(values.date ?? "today", now);
-      const all = await client.listStudents();
-      const students: Student[] = values.student ? [await client.findStudent(values.student)] : all;
+      const students: Student[] | undefined = values.student ? [await client.findStudent(values.student)] : undefined;
       const serviceMatch = new RegExp(values.service ?? "lunch", "i");
-      const orders = await client.listOrders({ from: date, to: date, includeInactive: true });
-      const daysByService = new Map<string, OrderDay[]>();
-      const slotsByStudent = new Map<string, Awaited<ReturnType<FlexiClient["listServiceSlots"]>>>();
-      for (const s of students) {
-        slotsByStudent.set(s.key, await client.listServiceSlots(s));
-        for (const v of s.services.filter((v) => serviceMatch.test(v.name))) daysByService.set(`${s.key}:${v.key}`, await client.getOrderDays(s.key, v.key));
-      }
-      const rows = checkOrders({ date, students, orders, daysByService, slotsByStudent, serviceMatch, now });
+      const rows = await client.checkDay({ date, ...(students ? { students } : {}), serviceMatch, now });
       print(json, rows, rows.length ? rows.map(fmtCheck).join("\n") : "(no matching services)");
       return rows.some((r) => r.status === "missing" || r.status === "missed_cutoff") ? 1 : 0;
     }

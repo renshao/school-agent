@@ -3,7 +3,8 @@ export type FlexiErrorKind =
   | "http" // non-2xx from Flexischools
   | "schema" // response did not match what we expect (API drift)
   | "not_found" // student/service/item/date not found
-  | "precondition"; // refused before sending (e.g. item out of stock, cutoff passed)
+  | "precondition" // refused before sending (e.g. item out of stock, cutoff passed)
+  | "outcome_unknown"; // a write was sent but its result could not be confirmed: it MAY have happened, never retry blindly
 
 export class FlexiError extends Error {
   readonly kind: FlexiErrorKind;
