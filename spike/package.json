@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "login": "node --env-file=../.env login.mjs"
+    "login": "node --env-file=../.env login.mjs",
+    "explore": "node --env-file=../.env explore.mjs"
   },
   "dependencies": {
     "puppeteer-core": "^25.16.0"
