@@ -1,0 +1,11 @@
+{
+  "name": "school-agent-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "login": "node --env-file=../.env login.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.16.0"
+  }
+}
