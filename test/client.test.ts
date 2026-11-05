@@ -210,6 +210,68 @@ describe("placeOrder", () => {
   });
 });
 
+describe("placeOrder response handling (the server's response shape must not be trusted)", () => {
+  const detailNew = route("GET", /\/api\/v1\.0\/orders\/ord-new$/, () => json(orderDetailResponse("Placed", true)));
+  const echoId = (c: Parameters<Handler>[0]) => JSON.parse(c.body!).placeOrderRequests[0].orderRequestId as string;
+
+  async function planFor(client: FlexiClient) {
+    const { student, lunch } = await alice(client);
+    return client.planOrder({ student, service: lunch, date: "2026-11-06", lines: [{ itemKey: "i-cheese", quantity: 1, optionKeys: [] }] });
+  }
+  const historyWithNewOrder = () => {
+    const h = structuredClone(orderHistoryResponse) as any;
+    h.presentOrders[0].orders.push({ ...h.presentOrders[0].orders[1], orderKey: { id: 9, value: "ord-new" } });
+    return h;
+  };
+
+  it("finds the order when the response is an array of per-order results", async () => {
+    const post = route("POST", /\/api\/v2\.0\/orders$/, (c) => json([{ ...placeOrderResponse, orderRequestId: echoId(c) }]));
+    const { client } = setup(post, detailNew);
+    assert.equal((await client.placeOrder(await planFor(client))).state, "Placed");
+  });
+
+  it("finds the order inside a wrapper object, picking ours among several results by orderRequestId", async () => {
+    const post = route("POST", /\/api\/v2\.0\/orders$/, (c) => json({ results: [{ ...placeOrderResponse, orderKey: "ord-other", orderRequestId: "someone-else" }, { ...placeOrderResponse, orderKey: "ord-new", orderRequestId: echoId(c) }] }));
+    const { client, calls } = setup(post, detailNew);
+    await client.placeOrder(await planFor(client));
+    assert.ok(calls.at(-1)!.url.pathname.endsWith("/orders/ord-new"), "read back OUR order, not the other");
+  });
+
+  it("an unrecognisable response is reconciled against the order list (the real-world case)", async () => {
+    let posted = false;
+    const post = route("POST", /\/api\/v2\.0\/orders$/, () => ((posted = true), json({ ok: true })));
+    const history = route("POST", /orders\/order-history$/, () => json(posted ? historyWithNewOrder() : orderHistoryResponse));
+    const { client, calls } = setup(history, post, detailNew);
+    const placed = await client.placeOrder(await planFor(client));
+    assert.equal(placed.state, "Placed");
+    assert.ok(calls.at(-1)!.url.pathname.endsWith("/orders/ord-new"), "read back the order found by reconciliation");
+  });
+
+  it("if the outcome cannot be confirmed, it says the order MAY have been placed and never leaks values", async () => {
+    const post = route("POST", /\/api\/v2\.0\/orders$/, () => json({ ok: true, secretish: "value-123" }));
+    const { client } = setup(post);
+    await assert.rejects(client.placeOrder(await planFor(client)), (e: unknown) => {
+      const m = (e as Error).message;
+      return e instanceof FlexiError && /MAY have been placed/.test(m) && /\{ok, secretish\}/.test(m) && !m.includes("value-123") && /flexi orders --from 2026-11-06/.test(m);
+    });
+  });
+
+  it("a connection failure after sending is reported as an unknown outcome", async () => {
+    const post: Handler = (c) => {
+      if (c.method === "POST" && /\/api\/v2\.0\/orders$/.test(c.url.pathname)) throw new TypeError("fetch failed");
+      return undefined;
+    };
+    const { client } = setup(post);
+    await assert.rejects(client.placeOrder(await planFor(client)), /Connection failed.*MAY have been placed/);
+  });
+
+  it("an HTTP error status means the request was refused (no 'may have been placed')", async () => {
+    const post = route("POST", /\/api\/v2\.0\/orders$/, () => json({ message: "invalid" }, 400));
+    const { client } = setup(post);
+    await assert.rejects(client.placeOrder(await planFor(client)), (e: unknown) => e instanceof FlexiError && e.status === 400 && !/MAY have/.test(e.message));
+  });
+});
+
 describe("cancelOrder", () => {
   it("sends DELETE with the bare order key as the body, then confirms the new state", async () => {
     let cancelled = false;

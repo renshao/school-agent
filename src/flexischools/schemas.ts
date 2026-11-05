@@ -125,12 +125,3 @@ export const ItemListResponse = z.object({
   supplierDistributionTimeKey: z.string(),
   itemCategories: z.array(z.object({ name: z.string(), items: z.array(menuItem) })),
 });
-
-// POST /api/v2.0/orders  (response)
-export const PlaceOrderResponse = z.object({
-  orderRequestId: z.string(),
-  orderId: z.number(),
-  orderKey: z.string(),
-  orderPlaced: z.boolean(),
-  error: z.unknown().nullable().optional(),
-});

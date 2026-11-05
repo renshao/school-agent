@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 import { CHANNEL_ORDERING_PORTAL } from "./config.ts";
+import { datePart } from "./dates.ts";
 import { FlexiError } from "./errors.ts";
 import { buildOrderItem } from "./request.ts";
 import type { FlexiHttp } from "./http.ts";
@@ -19,7 +20,6 @@ import {
   OrderDetailResponse,
   OrderFeeResponse,
   OrderHistoryResponse,
-  PlaceOrderResponse,
   StudentsResponse,
 } from "./schemas.ts";
 import type {
@@ -36,6 +36,39 @@ import type {
 } from "./types.ts";
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+interface PlaceResult {
+  orderKey?: string;
+  orderPlaced?: boolean;
+  error?: unknown;
+}
+
+/** Finds the result for our request anywhere in the response (object, array, or wrapper), matching on orderRequestId. */
+function findPlaceResult(raw: unknown, orderRequestId: string): PlaceResult | undefined {
+  const candidates: Record<string, unknown>[] = [];
+  const walk = (v: unknown, depth: number): void => {
+    if (depth > 4 || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) return void v.forEach((x) => walk(x, depth + 1));
+    const o = v as Record<string, unknown>;
+    if (typeof o.orderKey === "string" || "orderPlaced" in o) candidates.push(o);
+    for (const x of Object.values(o)) walk(x, depth + 1);
+  };
+  walk(raw, 0);
+  const mine = candidates.find((c) => c.orderRequestId === orderRequestId) ?? (candidates.length === 1 ? candidates[0] : undefined);
+  if (!mine) return undefined;
+  return {
+    ...(typeof mine.orderKey === "string" ? { orderKey: mine.orderKey } : {}),
+    ...(typeof mine.orderPlaced === "boolean" ? { orderPlaced: mine.orderPlaced } : {}),
+    ...("error" in mine ? { error: mine.error } : {}),
+  };
+}
+
+/** Structure only (key names and array sizes, never values), safe to put in an error message. */
+function describeShape(v: unknown): string {
+  if (Array.isArray(v)) return `array[${v.length}]${v.length ? ` of ${describeShape(v[0])}` : ""}`;
+  if (v && typeof v === "object") return `{${Object.keys(v).slice(0, 12).join(", ")}}`;
+  return v === null ? "null" : typeof v;
+}
 
 function parse<T extends z.ZodType>(schema: T, raw: unknown, what: string): z.infer<T> {
   const r = schema.safeParse(raw);
@@ -203,17 +236,45 @@ export class FlexiClient {
 
   /**
    * Sends a plan built by planOrder. This spends money. Callers must have obtained explicit approval first.
-   * Verifies the order by reading it back and returns it.
+   *
+   * The server's response shape is not relied on: we look for the order in whatever came back, and otherwise
+   * reconcile against the order list (an order that did not exist before the request, for this student, service and
+   * date). If the outcome still cannot be confirmed, the error says the order MAY have been placed, so nobody retries
+   * blindly and orders twice.
    */
   async placeOrder(plan: OrderPlan): Promise<OrderDetail> {
-    const raw = await this.http.request("POST", "/api/v2.0/orders", {
-      body: plan.body,
-      headers: { "x-channel": CHANNEL_ORDERING_PORTAL },
-    });
-    const res = parse(PlaceOrderResponse, raw, "place order");
-    if (!res.orderPlaced) throw new FlexiError("http", `Order was not placed: ${JSON.stringify(res.error ?? null).slice(0, 200)}`);
-    const detail = await this.getOrder(res.orderKey);
-    if (!detail.active) throw new FlexiError("http", `Order ${res.orderKey} came back in state ${detail.state}`);
+    const req = plan.body.placeOrderRequests[0];
+    if (!req) throw new FlexiError("precondition", "Plan has no order");
+    const date = datePart(req.dueDate);
+    const listFor = (includeInactive: boolean) => this.listOrders({ from: date, to: date, studentKey: req.studentKey, includeInactive });
+    const before = new Set((await listFor(true)).map((o) => o.key));
+
+    let raw: unknown;
+    try {
+      raw = await this.http.request("POST", "/api/v2.0/orders", { body: plan.body, headers: { "x-channel": CHANNEL_ORDERING_PORTAL } });
+    } catch (e) {
+      if (e instanceof FlexiError) throw e; // an HTTP error status: the request was refused
+      // Network-level failure after sending: the outcome is unknown.
+      throw new FlexiError("http", `Connection failed while placing the order; it MAY have been placed. Run "flexi orders --from ${date} --to ${date}" before retrying.`);
+    }
+
+    const found = findPlaceResult(raw, req.orderRequestId);
+    if (found?.orderPlaced === false) {
+      throw new FlexiError("http", `Order was not placed: ${JSON.stringify(found.error ?? null).slice(0, 200)}`);
+    }
+    let orderKey = found?.orderKey;
+    if (!orderKey) {
+      const fresh = (await listFor(false)).filter((o) => !before.has(o.key) && o.serviceKey === req.supplierServiceKey);
+      if (fresh.length === 1) orderKey = fresh[0]!.key;
+      else {
+        throw new FlexiError(
+          "http",
+          `The order request was accepted but its result could not be confirmed (response: ${describeShape(raw)}). It MAY have been placed: run "flexi orders --from ${date} --to ${date}" before retrying.`,
+        );
+      }
+    }
+    const detail = await this.getOrder(orderKey);
+    if (!detail.active) throw new FlexiError("http", `Order ${orderKey} came back in state ${detail.state}`);
     return detail;
   }
 
