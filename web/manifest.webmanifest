@@ -1,0 +1,11 @@
+{
+  "name": "School",
+  "short_name": "School",
+  "description": "Canteen orders and school logistics for the household.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f1e7",
+  "theme_color": "#f6f1e7",
+  "icons": [{ "src": "/static/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" }]
+}

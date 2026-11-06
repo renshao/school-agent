@@ -1,31 +1,11 @@
 // The agent loop against a scripted fake of the Messages API (no network, no spend) and the fake Flexischools API.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import Anthropic from "@anthropic-ai/sdk";
-import { Agent } from "../src/agent/agent.ts";
+import { Agent, repairHistory } from "../src/agent/agent.ts";
 import { ApprovalDesk } from "../src/agent/approvals.ts";
 import { fakeFlexi } from "./flexi-fake.ts";
-
-type Block = Record<string, unknown>;
-const toolUse = (id: string, name: string, input: unknown): Block => ({ type: "tool_use", id, name, input });
-const text = (t: string): Block => ({ type: "text", text: t });
-
-/** A fake /v1/messages that answers from a script and records each request body and its headers. */
-function fakeModel(script: { content: Block[]; stop_reason: string }[]) {
-  const requests: { body: any; headers: Headers }[] = [];
-  let n = 0;
-  const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url);
-    assert.equal(url.pathname, "/v1/messages");
-    requests.push({ body: JSON.parse(String(init?.body)), headers: new Headers(init?.headers) });
-    await new Promise((r) => setTimeout(r, 1)); // let concurrent callers interleave if they could
-    const step = script[n++];
-    if (!step) throw new Error(`fake model: no scripted reply #${n}`);
-    const msg = { id: `msg_${n}`, type: "message", role: "assistant", model: "claude-opus-5-5", ...step, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } };
-    return new Response(JSON.stringify(msg), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof globalThis.fetch;
-  return { anthropic: new Anthropic({ apiKey: "test-key", fetch, maxRetries: 0 }), requests };
-}
+import { fakeModel, text, toolUse } from "./model-fake.ts";
+import type { Block } from "./model-fake.ts";
 
 const NOW = new Date("2026-11-05T20:00:00Z"); // Fri 6 Nov 07:00 Sydney
 
@@ -156,5 +136,17 @@ describe("agent loop", () => {
     assert.equal(model.requests.length, 2);
     assert.match(r.text, /Stopped after 2 steps/);
     assert.equal(agent.history.at(-1)!.role, "user", "the last tool call was answered");
+  });
+
+  it("restored history with an unanswered tool call (a crash mid-turn) gets an error result so it can be sent again", () => {
+    const messages = [
+      { role: "user" as const, content: "hi" },
+      { role: "assistant" as const, content: [{ type: "tool_use" as const, id: "tu_9", name: "list_students", input: {} }] },
+    ];
+    const fixed = repairHistory(messages);
+    assert.equal(fixed.length, 3);
+    const result = (fixed[2]!.content as unknown as Block[])[0]!;
+    assert.deepEqual([result.type, result.tool_use_id, result.is_error], ["tool_result", "tu_9", true]);
+    assert.equal(repairHistory(fixed).length, 3, "a complete history is left alone");
   });
 });

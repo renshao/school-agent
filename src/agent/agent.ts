@@ -8,9 +8,12 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { BetaContentBlockParam, BetaMessage, BetaMessageParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { DEFAULT_TIMEZONE } from "../flexischools/config.ts";
+import { ymdInZone } from "../flexischools/index.ts";
 import type { FlexiClient } from "../flexischools/index.ts";
 import { describeProposal } from "./approvals.ts";
 import type { ApprovalDesk, Proposal } from "./approvals.ts";
+import { memoryBlock } from "./memory.ts";
+import type { MemoryChange, MemoryStore } from "./memory.ts";
 import { SYSTEM_PROMPT } from "./prompt.ts";
 import { createTools } from "./tools.ts";
 
@@ -35,11 +38,13 @@ export const DEFAULT_CONFIG: AgentConfig = {
 };
 
 export type AgentEvent =
-  | { type: "user"; author: string; content: BetaContentBlockParam[] }
+  | { type: "user"; author: string; text: string; content: BetaContentBlockParam[] }
   | { type: "assistant"; message: BetaMessage }
   | { type: "tool_results"; message: BetaMessageParam }
   | { type: "proposal"; proposal: Proposal }
-  | { type: "decision"; proposal: Proposal }
+  /** `note` is the [host event] text the model will see at the start of its next turn. */
+  | { type: "decision"; proposal: Proposal; note: string }
+  | { type: "memory"; change: MemoryChange }
   | { type: "error"; error: string };
 
 export interface TurnResult {
@@ -58,6 +63,35 @@ export interface AgentOptions {
   config?: Partial<AgentConfig>;
   now?: () => Date;
   onEvent?: (e: AgentEvent) => void;
+  /** Saved rules and notes: enables the memory tools, and the conversation starts with what is saved. */
+  memory?: MemoryStore;
+  /** Resume a conversation, e.g. after a restart: its messages (from the event log) and undelivered host notes. */
+  restore?: { messages?: readonly BetaMessageParam[]; notes?: readonly string[] };
+}
+
+/** Agent settings from AGENT_MODEL / AGENT_EFFORT, leaving the rest at their defaults. */
+export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Partial<AgentConfig> {
+  return {
+    ...(env.AGENT_MODEL ? { model: env.AGENT_MODEL } : {}),
+    ...(env.AGENT_EFFORT ? { effort: env.AGENT_EFFORT as Effort } : {}),
+  };
+}
+
+const INTERRUPTED = "Interrupted: the server restarted before this tool finished. Nothing was placed or cancelled by it.";
+
+/**
+ * Makes restored history valid to send again. A crash between a tool call and its result would leave a tool_use with
+ * no tool_result (a 400 from the API), so each unanswered call gets an error result. Tools never spend money (only
+ * proposals, which do not survive a restart), so nothing needs undoing.
+ */
+export function repairHistory(messages: readonly BetaMessageParam[]): BetaMessageParam[] {
+  const out = [...messages];
+  const last = out.at(-1);
+  if (last?.role === "assistant" && Array.isArray(last.content)) {
+    const calls = last.content.filter((b) => b.type === "tool_use");
+    if (calls.length) out.push({ role: "user", content: calls.map((b) => ({ type: "tool_result" as const, tool_use_id: b.id, content: INTERRUPTED, is_error: true })) });
+  }
+  return out;
 }
 
 /** "Thu, 5 Nov 2026, 17:42" in school-local time. */
@@ -83,6 +117,8 @@ export class Agent {
   private notes: string[] = [];
   private turnProposals: Proposal[] = [];
   private queue: Promise<unknown> = Promise.resolve();
+  private memory: MemoryStore | undefined;
+  private author = "a parent";
 
   constructor(opts: AgentOptions) {
     this.anthropic = opts.anthropic;
@@ -90,10 +126,16 @@ export class Agent {
     this.config = { ...DEFAULT_CONFIG, ...opts.config };
     this.now = opts.now ?? (() => new Date());
     this.emit = opts.onEvent ?? (() => {});
+    this.messages = repairHistory(opts.restore?.messages ?? []);
+    this.notes = [...(opts.restore?.notes ?? [])];
+    this.memory = opts.memory;
     this.tools = createTools({
       client: opts.client,
       desk: opts.desk,
       now: this.now,
+      ...(opts.memory ? { memory: opts.memory } : {}),
+      author: () => this.author,
+      onMemory: (change) => this.emit({ type: "memory", change }),
       onProposal: (p) => {
         this.turnProposals.push(p);
         this.emit({ type: "proposal", proposal: p });
@@ -104,6 +146,16 @@ export class Agent {
   /** The conversation so far (append-only). */
   get history(): readonly BetaMessageParam[] {
     return this.messages;
+  }
+
+  /** Host notes not yet delivered to the model (handed over when a new conversation replaces this one). */
+  takeNotes(): string[] {
+    return this.notes.splice(0);
+  }
+
+  /** Host notes to deliver at the start of the next turn. */
+  queueNotes(notes: readonly string[]): void {
+    this.notes.push(...notes);
   }
 
   get toolNames(): string[] {
@@ -132,17 +184,23 @@ export class Agent {
   }
 
   private decided(p: Proposal): void {
-    this.notes.push(`${p.decidedBy ?? "A parent"} ${p.status === "rejected" ? "rejected" : "approved"} proposal ${p.id} (${describeProposal(p)}). Result: ${p.status}. ${p.outcome ?? ""}`.trim());
-    this.emit({ type: "decision", proposal: p });
+    const note = `${p.decidedBy ?? "A parent"} ${p.status === "rejected" ? "rejected" : "approved"} proposal ${p.id} (${describeProposal(p)}). Result: ${p.status}. ${p.outcome ?? ""}`.trim();
+    this.notes.push(note);
+    this.emit({ type: "decision", proposal: p, note });
   }
 
   private async turn(author: string, text: string): Promise<TurnResult> {
+    this.author = author;
+    // The first message of a conversation carries what the household asked to remember. Later changes reach the model
+    // as tool results (its own) or [host event] notes (a parent's, from the app).
+    const memory = this.messages.length === 0 && this.memory ? memoryBlock(this.memory.activeSkips(ymdInZone(this.now())), this.memory.activeNotes()) : "";
     const content: BetaContentBlockParam[] = [
+      ...(memory ? [{ type: "text" as const, text: memory }] : []),
       ...this.notes.splice(0).map((n): BetaContentBlockParam => ({ type: "text", text: `[host event] ${n}` })),
       { type: "text", text: `[${localStamp(this.now())} · ${author}]\n${text}` },
     ];
     this.messages.push({ role: "user", content });
-    this.emit({ type: "user", author, content });
+    this.emit({ type: "user", author, text, content });
     this.turnProposals = [];
 
     const c = this.config;

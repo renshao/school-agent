@@ -7,12 +7,13 @@ import { join } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { Agent } from "./agent/agent.ts";
-import type { AgentEvent, Effort } from "./agent/agent.ts";
+import { Agent, configFromEnv } from "./agent/agent.ts";
+import type { AgentEvent } from "./agent/agent.ts";
 import { ApprovalDesk, describeProposal } from "./agent/approvals.ts";
 import type { Proposal } from "./agent/approvals.ts";
 import { SessionLog } from "./agent/log.ts";
 import { createFlexiClient } from "./flexischools/index.ts";
+import { Store } from "./web/store.ts";
 
 const HELP = `Commands:
   /approve <id>   approve a proposal (places or cancels it)
@@ -29,7 +30,9 @@ async function main(): Promise<void> {
   const user = values.user ?? process.env.SCHOOL_AGENT_USER ?? "Parent";
 
   const client = createFlexiClient();
-  const desk = new ApprovalDesk(client);
+  // The same SQLite file as the web chat, so both share what the household asked the assistant to remember.
+  const memory = new Store(process.env.SCHOOL_DB ?? join(process.cwd(), ".state", "school.db"));
+  const desk = new ApprovalDesk(client, { memory });
   const sessionId = new Date().toISOString().replace(/[:.]/g, "-");
   const log = new SessionLog(join(process.cwd(), ".state", "sessions"), sessionId);
 
@@ -58,10 +61,8 @@ async function main(): Promise<void> {
     client,
     desk,
     onEvent,
-    config: {
-      ...(env.AGENT_MODEL ? { model: env.AGENT_MODEL } : {}),
-      ...(env.AGENT_EFFORT ? { effort: env.AGENT_EFFORT as Effort } : {}),
-    },
+    config: configFromEnv(env),
+    memory,
   });
 
   const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 };

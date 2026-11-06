@@ -91,8 +91,17 @@ src/flexischools/   the Flexischools client (no LLM, no UI)
                     (buildOrderItem: stock, required/min/max, sold-out options with alternatives) (pure)
   check.ts          checkOrders: ordered | missing | missed_cutoff | no_order_day (pure)
 src/agent/          the LLM loop (SDK tool runner): tools.ts (typed tools over the client), approvals.ts (ApprovalDesk:
-                    proposals that only a human approval executes), agent.ts (turns, history, host approve/reject)
-src/chat.ts         `npm run chat`: terminal stand-in for the web chat, including the approval prompt
+                    proposals that only a human approval executes), agent.ts (turns, history, host approve/reject),
+                    memory.ts (paused checks and notes: shapes, skipApplies, the [household memory] block)
+src/web/            the web chat server (`npm run web`, plain node:http, no framework):
+  store.ts          SQLite (node:sqlite, WAL, 0600): append-only event log, web sessions, OAuth logins in progress
+  household.ts      the one shared conversation: persists + fans out every event, rebuilds the model's history on
+                    restart, one model context per school day, serialized turns, Today strip (cached)
+  google.ts         Google sign-in (OIDC code flow + PKCE + nonce + single-use state); server.ts: routes, cookies,
+                    CSRF (Origin + JSON), SSE live stream, strict CSP; views.ts: events -> display records; today.ts
+web/                the page: index.html, app.js (vanilla, text nodes only), style.css (warm paper, dark mode), login
+src/web.ts          entry point; DEPLOY.md: Google OAuth client, systemd, Caddy for school.shao.io
+src/chat.ts         `npm run chat`: terminal chat, including the approval prompt
 src/cli.ts          `npm run flexi -- <command>`; read commands, plus place/cancel as dry runs unless --yes
 test/               node:test with synthetic fixtures (fake names/ids); `npm test`, `npm run typecheck`
 spike/              throwaway discovery scripts (Lightpanda, Chrome capture); kept for reference
@@ -158,7 +167,7 @@ Either store an encrypted cookie jar in the broker or log in fresh each task. Fr
 1b. ✅ Order flow captured in real Chrome (place, view upcoming, cancel). Exact `POST /api/v2.0/orders` body captured, then **verified over plain HTTP with no browser**: this client placed an Up & Go (Chocolate) order for tomorrow ($4.19) and cancelled it 47 s later (state history New Order → Placed → Cancelled By User).
 2. ✅ Plain Flexischools client + CLI in TypeScript (`src/`, no LLM): students, services, days, orders, order, menu, check, and place/cancel (dry-run unless `--yes`). 74 unit tests, including a two-item order with options that matches the body captured from the app. Next: the LLM loop on top of the same functions.
 2b. ✅ LLM agent loop (`src/agent/`, `npm run chat`) with the approval gate: the model proposes (`plan_order` / `plan_cancel`), only a human approval executes, re-validated at approval time. 96 tests.
-3. Web chat: auth, sessions, members and kids, live fan-out (Web Push for notifications).
+3. ✅ Web chat (`src/web/`, `web/`, `npm run web`): Google sign-in with an email allowlist, one shared household conversation in SQLite (survives restarts), live fan-out over SSE, Today strip, proposal cards with two-tap Approve. 119 tests. Deploy: `DEPLOY.md`. Memory: paused checks (rules + day exceptions, confirmed by a parent) and notes, in SQLite, read by the Today strip, check_orders and the model. 131 tests. Still to do: Web Push.
 4. ~~`place_order` with the approval gate.~~ Done in 2b.
 5. Scheduler, morning routine, push notifications.
 6. Move the runner into Firecracker with the egress allowlist; deploy to the server.

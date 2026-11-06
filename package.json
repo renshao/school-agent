@@ -8,6 +8,7 @@
   "scripts": {
     "flexi": "node --env-file-if-exists=.env src/cli.ts",
     "chat": "node --env-file-if-exists=.env src/chat.ts",
+    "web": "node --env-file-if-exists=.env src/web.ts",
     "test": "node --test test/",
     "typecheck": "tsc --noEmit"
   },

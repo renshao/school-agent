@@ -10,6 +10,8 @@
 //   - an unconfirmed outcome ("it MAY have been placed") is final: never retried
 import { FlexiClient, FlexiError, resolveLine } from "../flexischools/index.ts";
 import type { ItemRequest, Order, OrderDetail, OrderPlan } from "../flexischools/index.ts";
+import { describeSkip } from "./memory.ts";
+import type { MemoryStore, Skip, SkipDraft } from "./memory.ts";
 
 export type ProposalStatus = "pending" | "executing" | "done" | "rejected" | "expired" | "stale" | "failed" | "unknown";
 
@@ -41,18 +43,30 @@ export interface CancelProposal extends ProposalBase {
   cancelled?: OrderDetail;
 }
 
-export type Proposal = OrderProposal | CancelProposal;
+/** Pause order checks (a standing rule or a day exception). Spends nothing, but switches reminders off, so a parent confirms it. */
+export interface SkipProposal extends ProposalBase {
+  kind: "skip";
+  skips: SkipDraft[];
+  saved?: Skip[];
+}
+
+export type Proposal = OrderProposal | CancelProposal | SkipProposal;
 
 export interface ApprovalDeskOptions {
   now?: () => Date;
   /** How long a proposal stays approvable. Default 30 minutes. */
   ttlMs?: number;
+  /** Ids continue after this number (P<n+1>), so ids stay unique across restarts when proposals are logged. */
+  lastSeq?: number;
+  /** Where approved skips are saved. Without it, skips cannot be proposed. */
+  memory?: MemoryStore;
 }
 
 const money = (n: number): string => `$${n.toFixed(2)}`;
 
 /** One line a human can approve from: kid, service, date, every item, and the total. */
 export function describeProposal(p: Proposal): string {
+  if (p.kind === "skip") return `PAUSE CHECKS ${p.skips.map(describeSkip).join("; ")}`;
   if (p.kind === "cancel") {
     const o = p.order;
     return `CANCEL ${o.studentName} · ${o.serviceName} · ${o.date} · ${o.items.map((i) => i.name).join(" + ")} · ${money(o.total)} (order ${o.key})`;
@@ -70,11 +84,14 @@ export class ApprovalDesk {
   private ttlMs: number;
   private proposals = new Map<string, Proposal>();
   private seq = 0;
+  private memory: MemoryStore | undefined;
 
   constructor(client: FlexiClient, opts: ApprovalDeskOptions = {}) {
     this.client = client;
     this.now = opts.now ?? (() => new Date());
     this.ttlMs = opts.ttlMs ?? 30 * 60_000;
+    this.seq = opts.lastSeq ?? 0;
+    this.memory = opts.memory;
   }
 
   private nextId(): string {
@@ -101,6 +118,21 @@ export class ApprovalDesk {
     if (!order.active) throw new FlexiError("precondition", `Order ${orderKey} is already ${order.state}`);
     if (!order.canCancel) throw new FlexiError("precondition", `Order ${orderKey} can no longer be cancelled (state ${order.state}; it has probably been sent to the canteen)`);
     const p: CancelProposal = { ...this.base(), kind: "cancel", orderKey, order };
+    this.proposals.set(p.id, p);
+    return p;
+  }
+
+  /** Stores paused checks for confirmation (sends nothing, saves nothing yet). */
+  proposeSkip(skips: SkipDraft[]): SkipProposal {
+    if (!this.memory) throw new FlexiError("precondition", "Saving rules is not available here");
+    if (!skips.length) throw new FlexiError("precondition", "Nothing to pause");
+    for (const s of skips) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s.from) || (s.to !== null && !/^\d{4}-\d{2}-\d{2}$/.test(s.to))) throw new FlexiError("precondition", "Dates must be YYYY-MM-DD");
+      if (s.to !== null && s.to < s.from) throw new FlexiError("precondition", `The end date ${s.to} is before the start date ${s.from}`);
+      if (s.weekdays && !s.weekdays.length) throw new FlexiError("precondition", "weekdays, if given, must name at least one day");
+      if (!s.reason.trim()) throw new FlexiError("precondition", "Give a short reason (e.g. excursion, buys his own lunch)");
+    }
+    const p: SkipProposal = { ...this.base(), kind: "skip", skips: structuredClone(skips) };
     this.proposals.set(p.id, p);
     return p;
   }
@@ -133,7 +165,8 @@ export class ApprovalDesk {
     p.decidedBy = by;
     try {
       if (p.kind === "order") await this.executeOrder(p);
-      else await this.executeCancel(p);
+      else if (p.kind === "cancel") await this.executeCancel(p);
+      else this.executeSkip(p, by);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (e instanceof FlexiError && e.kind === "outcome_unknown") {
@@ -141,7 +174,7 @@ export class ApprovalDesk {
         p.outcome = `Outcome unknown: ${msg}`;
       } else {
         p.status = "failed";
-        p.outcome = `Failed, nothing ${p.kind === "order" ? "ordered" : "cancelled"}: ${msg}`;
+        p.outcome = `Failed, nothing ${p.kind === "order" ? "ordered" : p.kind === "cancel" ? "cancelled" : "saved"}: ${msg}`;
       }
     }
     return p;
@@ -191,6 +224,13 @@ export class ApprovalDesk {
     p.placed = placed;
     p.status = "done";
     p.outcome = `Placed order ${placed.key} (${placed.state}), total ${money(placed.total)}`;
+  }
+
+  private executeSkip(p: SkipProposal, by: string): void {
+    const now = this.now();
+    p.saved = p.skips.map((d) => this.memory!.addSkip(d, by, now));
+    p.status = "done";
+    p.outcome = `Saved: ${p.saved.map((s) => `S${s.id} ${describeSkip(s)}`).join("; ")}`;
   }
 
   private async executeCancel(p: CancelProposal): Promise<void> {

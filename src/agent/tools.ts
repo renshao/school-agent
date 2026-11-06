@@ -4,10 +4,12 @@
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import type { BetaRunnableTool } from "@anthropic-ai/sdk/lib/tools/BetaRunnableTool";
 import { z } from "zod";
-import { FlexiClient, resolveDate } from "../flexischools/index.ts";
-import type { MenuItem, Order, OrderDetail } from "../flexischools/index.ts";
+import { FlexiClient, FlexiError, resolveDate, ymdInZone } from "../flexischools/index.ts";
+import type { MenuItem, Order, OrderDetail, Student } from "../flexischools/index.ts";
 import { describeProposal } from "./approvals.ts";
 import type { ApprovalDesk, Proposal } from "./approvals.ts";
+import { describeNote, describeSkip, findSkip, WEEKDAYS } from "./memory.ts";
+import type { MemoryChange, MemoryStore, SkipDraft } from "./memory.ts";
 
 export interface ToolContext {
   client: FlexiClient;
@@ -15,6 +17,11 @@ export interface ToolContext {
   now: () => Date;
   /** Called when the model creates a proposal, so the UI can show it with Approve / Reject. */
   onProposal?: (p: Proposal) => void;
+  /** Saved rules and notes. Without it, the memory tools are not offered. */
+  memory?: MemoryStore;
+  /** Who the current turn is for (memory changes are attributed to them). */
+  author?: () => string;
+  onMemory?: (c: MemoryChange) => void;
 }
 
 const out = (data: unknown): string => JSON.stringify(data);
@@ -66,11 +73,108 @@ function proposalView(p: Proposal) {
 }
 
 const awaitingNote =
-  "Waiting for a household member to approve it in the app (Approve button or /approve). You cannot place or cancel anything yourself, and nothing has happened yet: do not say it is done.";
+  "Waiting for a household member to press Approve on the proposal card in the app. You cannot place or cancel anything yourself, and nothing has happened yet: do not say it is done.";
+
+const idArg = (prefix: string) =>
+  z
+    .string()
+    .regex(new RegExp(`^${prefix}?\\d+$`, "i"))
+    .describe(`Id as listed, e.g. "${prefix}3"`);
+const parseId = (s: string): number => Number(s.replace(/^\D+/, ""));
 
 export function createTools(ctx: ToolContext): BetaRunnableTool<any>[] {
-  const { client, desk } = ctx;
+  const { client, desk, memory } = ctx;
   const day = (d: string | undefined, fallback: string): string => resolveDate(d ?? fallback, ctx.now());
+  const author = (): string => ctx.author?.() ?? "a parent";
+
+  const memoryTools: BetaRunnableTool<any>[] = !memory
+    ? []
+    : [
+        betaZodTool({
+          name: "plan_skip",
+          description:
+            "Propose pausing order checks and reminders for one or more children, when no canteen order is needed. A standing rule has no `to` date (e.g. \"Bob buys his own lunch\", or only on some weekdays); a day exception has dates (an excursion, camp, a sick day, a pupil-free day for one class). A parent must confirm it in the app before it takes effect; nothing is saved until then.",
+          inputSchema: z.object({
+            students: z.array(studentArg).min(1).describe("Each child it applies to"),
+            service: z.string().optional().describe('Service name or a unique part of it, e.g. "lunch". Omit to pause every service.'),
+            from: dateArg.optional().describe('First day it applies (default "today").'),
+            to: dateArg.optional().describe("Last day it applies, inclusive. Omit for an ongoing rule; for a single day, the same as from."),
+            weekdays: z.array(z.enum(WEEKDAYS as [string, ...string[]])).min(1).optional().describe('Only on these weekdays, e.g. ["Fri"]. Omit for every day.'),
+            reason: z.string().min(1).max(120).describe('Short, in the parent\'s words, e.g. "excursion", "buys his own lunch"'),
+          }),
+          run: async ({ students, service, from, to, weekdays, reason }) => {
+            const drafts: SkipDraft[] = [];
+            for (const name of students) {
+              const st: Student = await client.findStudent(name);
+              const sv = service ? FlexiClient.findService(st, service) : null;
+              drafts.push({
+                studentKey: st.key,
+                studentName: st.firstName,
+                serviceKey: sv?.key ?? null,
+                serviceName: sv?.name ?? null,
+                from: day(from, "today"),
+                to: to ? day(to, "today") : null,
+                weekdays: (weekdays as SkipDraft["weekdays"]) ?? null,
+                reason: reason.trim(),
+              });
+            }
+            const p = desk.proposeSkip(drafts);
+            ctx.onProposal?.(p);
+            return out({ ...proposalView(p), note: "Waiting for a parent to press Save on the card. Nothing is saved yet." });
+          },
+        }),
+
+        betaZodTool({
+          name: "remove_skip",
+          description: "Remove a paused check (by id from list_memory), so the child is checked and reminded again. Takes effect immediately.",
+          inputSchema: z.object({ skip_id: idArg("S") }),
+          run: async ({ skip_id }) => {
+            const s = memory.removeSkip(parseId(skip_id), author(), ctx.now());
+            if (!s) throw new FlexiError("not_found", `No active paused check ${skip_id}`);
+            ctx.onMemory?.({ action: "skip_removed", skip: s, by: author() });
+            return out({ removed: `S${s.id}`, was: describeSkip(s) });
+          },
+        }),
+
+        betaZodTool({
+          name: "remember",
+          description:
+            "Save a lasting note for future conversations: a preference, allergy, habit or household fact (e.g. \"Alice doesn't like tomato\"). Saved immediately; the parents can see and delete notes. Not for one-off requests, and not for skipping orders (use plan_skip).",
+          inputSchema: z.object({
+            student: studentArg.optional().describe("The child it is about; omit for the whole household."),
+            text: z.string().min(1).max(300).describe("The note, short and self-contained, e.g. \"doesn't like tomato\" (the child's name is shown with it)."),
+          }),
+          run: async ({ student, text }) => {
+            const studentName = student ? (await client.findStudent(student)).firstName : null;
+            const n = memory.addNote({ studentName, text: text.trim() }, author(), ctx.now());
+            ctx.onMemory?.({ action: "note_added", note: n, by: author() });
+            return out({ saved: `N${n.id}`, note: describeNote(n) });
+          },
+        }),
+
+        betaZodTool({
+          name: "forget",
+          description: "Delete a saved note (by id from list_memory).",
+          inputSchema: z.object({ note_id: idArg("N") }),
+          run: async ({ note_id }) => {
+            const n = memory.removeNote(parseId(note_id), author(), ctx.now());
+            if (!n) throw new FlexiError("not_found", `No saved note ${note_id}`);
+            ctx.onMemory?.({ action: "note_removed", note: n, by: author() });
+            return out({ forgotten: `N${n.id}`, was: describeNote(n) });
+          },
+        }),
+
+        betaZodTool({
+          name: "list_memory",
+          description: "The current paused checks (standing rules and day exceptions, with ids) and saved notes (with ids).",
+          inputSchema: z.object({}),
+          run: async () =>
+            out({
+              paused_checks: memory.activeSkips(ymdInZone(ctx.now())).map((s) => ({ id: `S${s.id}`, what: describeSkip(s) })),
+              notes: memory.activeNotes().map((n) => ({ id: `N${n.id}`, note: describeNote(n) })),
+            }),
+        }),
+      ];
 
   return [
     betaZodTool({
@@ -154,21 +258,31 @@ export function createTools(ctx: ToolContext): BetaRunnableTool<any>[] {
     betaZodTool({
       name: "check_orders",
       description:
-        'Is food ordered for a date? Per child and matching service: "ordered", "missing" (nothing ordered, cutoff not passed yet), "missed_cutoff", or "no_order_day".',
+        'Is food ordered for a date? Per child and matching service: "ordered", "missing" (nothing ordered, cutoff not passed yet), "missed_cutoff", or "no_order_day". A row with "paused" is covered by a saved rule or day exception: no order is needed then.',
       inputSchema: z.object({
         date: z.string().optional().describe('Default "today". Also "tomorrow", "+N", or YYYY-MM-DD (school-local).'),
         service: z.string().optional().describe('Services whose name contains this text; default "lunch".'),
         student: z.string().optional().describe("A child's first name; default all children."),
       }),
       run: async ({ date, service, student }) => {
-        const students = student ? [await client.findStudent(student)] : undefined;
-        const rows = await client.checkDay({ date: day(date, "today"), ...(students ? { students } : {}), serviceMatch: new RegExp(escapeRe(service ?? "lunch"), "i"), now: ctx.now() });
+        const students = student ? [await client.findStudent(student)] : await client.listStudents();
+        const rows = await client.checkDay({ date: day(date, "today"), students, serviceMatch: new RegExp(escapeRe(service ?? "lunch"), "i"), now: ctx.now() });
+        const skips = memory?.activeSkips(ymdInZone(ctx.now())) ?? [];
+        const skipOf = (studentName: string, serviceName: string, date: string) => {
+          const st = students.find((s) => s.firstName === studentName);
+          const sv = st?.services.find((v) => v.name === serviceName);
+          return st && sv ? findSkip(skips, st.key, sv.key, date) : undefined;
+        };
         return out(
           rows.map((r) => ({
             student: r.student,
             service: r.service,
             date: r.date,
             status: r.status,
+            ...(() => {
+              const s = skipOf(r.student, r.service, r.date);
+              return s ? { paused: `S${s.id}: ${s.reason} (no order needed${r.status === "ordered" ? ", yet one exists" : ""})` } : {};
+            })(),
             ...(r.orders.length ? { orders: r.orders.map(orderView) } : {}),
             ...(r.closureReason ? { closure: r.closureReason } : {}),
             ...(r.minutesToCutoff !== undefined ? { minutes_to_cutoff: r.minutesToCutoff } : {}),
@@ -227,5 +341,7 @@ export function createTools(ctx: ToolContext): BetaRunnableTool<any>[] {
       inputSchema: z.object({}),
       run: async () => out(desk.pending().map(proposalView)),
     }),
+
+    ...memoryTools,
   ];
 }
