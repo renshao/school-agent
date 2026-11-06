@@ -34,6 +34,16 @@ export class FlexiHttp {
     this.baseUrl = opts.baseUrl ?? ORDERING_BASE_URL;
   }
 
+  /** Claims of the current ID token (not verified: we only read our own user key from it). */
+  async idTokenClaims(): Promise<Record<string, unknown>> {
+    const payload = (await this.tokens.getIdToken()).split(".")[1];
+    try {
+      return JSON.parse(Buffer.from(payload ?? "", "base64url").toString("utf8")) as Record<string, unknown>;
+    } catch {
+      throw new FlexiError("auth", "Malformed ID token");
+    }
+  }
+
   /** Returns parsed JSON (or null for an empty body). Retries once with a fresh token on 401. */
   async request(method: string, path: string, opts: RequestOptions = {}): Promise<unknown> {
     const auth = opts.auth ?? true;

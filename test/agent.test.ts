@@ -59,7 +59,7 @@ describe("agent loop", () => {
 
   it("exposes no tool that places, cancels or approves", () => {
     const { agent } = setup([]);
-    assert.deepEqual(agent.toolNames.sort(), ["check_orders", "get_menu", "get_order", "get_order_days", "list_orders", "list_proposals", "list_service_slots", "list_students", "plan_cancel", "plan_order"]);
+    assert.deepEqual(agent.toolNames.sort(), ["check_orders", "get_menu", "get_order", "get_order_days", "list_orders", "list_proposals", "list_service_slots", "list_students", "list_transactions", "meals", "plan_cancel", "plan_order"]);
   });
 
   it("a call to a tool that does not exist (e.g. a hallucinated place_order) is an error result, and nothing is sent", async () => {

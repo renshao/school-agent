@@ -11,7 +11,8 @@ Done and verified against the live Flexischools account:
 - **`src/agent/`**: the LLM agent loop (2026-11-05): SDK tool runner over 10 typed tools, a host-side approval desk, a terminal chat (`npm run chat`). Smoke-tested live (read-only question, real data).
 - **`src/web/` + `web/`**: the web chat (2026-11-05), for school.shao.io: Google sign-in (your two Google accounts, allowlisted via `ALLOWED_USERS`), one shared conversation persisted in SQLite (`.state/school.db`), live updates over SSE, Today strip, proposal cards. Verified locally in Chrome with dev login and live data (one real proposal, rejected). Deploy steps: `DEPLOY.md` (not deployed yet; Ren needs to create the Google OAuth client).
 - **Memory** (2026-11-05): paused checks (standing rules and day exceptions) and notes, shared by web and terminal chat. Verified live in Chrome (phone width) with the scratch DB.
-- **131 tests** (`npm test`), typecheck clean (`npm run typecheck`). Node 24+ runs the `.ts` directly: no build step.
+- **Meals and wallet** (2026-11-06): the account history (GraphQL `findTransactions`), so the agent can say what a child had even with no orders (a student-card purchase at the counter). `meals` merges ordered meals with card purchases; `list_transactions` has the balance and spending. Verified live (read-only) with the real model.
+- **141 tests** (`npm test`), typecheck clean (`npm run typecheck`). Node 24+ runs the `.ts` directly: no build step.
 
 **Not built yet: the scheduler/reminders, Web Push, the sandbox/Firecracker work.** See "Next" below.
 
@@ -21,6 +22,8 @@ Done and verified against the live Flexischools account:
 cp .env.example .env     # FLEXISCHOOL_USERNAME / FLEXISCHOOL_PASSWORD (gitignored; Ren has filled it in)
 npm run flexi -- students
 npm run flexi -- check --date tomorrow              # exit 1 if lunch is missing
+npm run flexi -- meals --from -4 --to today         # what each child had: orders + student-card purchases
+npm run flexi -- transactions                       # wallet balance + last 7 days of account history
 npm run flexi -- menu Alice "Junior Recess" tomorrow
 npm run flexi -- place Alice recess tomorrow "Up & Go [Chocolate]"       # dry run
 npm run chat -- --user Ren                          # chat with the agent (needs ANTHROPIC_API_KEY in .env)
@@ -52,6 +55,8 @@ Tokens are cached in `.state/flexischools-tokens.json` (0600, gitignored). Names
 
 ```
 src/flexischools/  auth.ts http.ts schemas.ts normalize.ts client.ts request.ts check.ts dates.ts types.ts index.ts
+                   transactions.ts (account-history rows: kind, items parsed from the description, local date/time)
+                   meals.ts (ordered meals + card purchases per day)
 src/agent/         agent.ts (loop, turns, host approve/reject) tools.ts (the model's tools) approvals.ts (ApprovalDesk) memory.ts (skips + notes: shapes, pure rules) prompt.ts log.ts
 src/cli.ts         the plain CLI
 src/web/           store.ts (SQLite) household.ts (shared conversation, restore, fan-out) server.ts (routes, auth, CSRF, SSE) google.ts views.ts today.ts config.ts
@@ -69,7 +74,7 @@ spike/             throwaway discovery scripts (Lightpanda login/menu, Chrome ca
 
 - **Lightpanda** (installed nightly `1.1.0-nightly.11062`; also tried 11739) reads the whole site but its `Add Item` click does not populate the cart (silent), so it cannot place orders. Real Chrome (the Claude in Chrome extension) works; that is how request bodies were captured (page `fetch` was wrapped to log and block the checkout POST, so no order was placed). Only needed if the HTTP path ever breaks.
 - The `Order again?` sheet appears on the item list; the web cart is client-side (`USER_CART_MULTI` in localStorage) until checkout.
-- **Open question:** the app says refunds go to the Flexischools wallet, but Ren said charges go to PayPal and the wallet balance did not move. Ask Ren what actually happened to the two test charges.
+- **Money flow (from the account history, 2026-11-06):** everything is paid from the Flexischools wallet, which tops itself up automatically from PayPal ($150 plus a PayPal surcharge). An order is charged to the wallet only when it **closes** (the evening of the day served), so the two test orders cancelled within a minute were never charged.
 - Unverified: option prices with quantity > 1 (assumed to multiply); items with `questionSets` (checkout questions) are refused because their request shape was never captured.
 - The Flexischools API is undocumented and its terms were not reviewed; keep the browser path as a fallback and keep schema/fixture tests current.
 
@@ -77,7 +82,7 @@ spike/             throwaway discovery scripts (Lightpanda login/menu, Chrome ca
 
 - **Tool runner** (`client.beta.messages.toolRunner`, `betaZodTool`), `thread: false`: `Agent` owns the append-only history (each reply verbatim, thinking blocks included, then its tool results via the runner's cached `generateToolResponse()`). One runner per user turn, `max_iterations` 12. Turns are serialized per `Agent`.
 - **Request:** `claude-opus-5-5`, effort `medium`, no `thinking` param (Opus 5.5 always thinks; disabling is a 400), top-level `cache_control` (auto caching), `fallbacks: "default"` + beta `server-side-fallback-2026-07-01` (server-side refusal fallback). The system prompt is byte-stable; the time and the speaker go in a header on each user turn (`[Fri, 6 Nov 2026, 07:00 · Ren]`).
-- **Tools:** list_students, list_service_slots, get_order_days, list_orders, get_order, get_menu, check_orders, plan_order, plan_cancel, list_proposals. They return compact JSON with no internal keys except `order_key`. Tool errors (FlexiError messages, zod validation) go back as `is_error` results.
+- **Tools:** list_students, list_service_slots, get_order_days, list_orders, get_order, get_menu, check_orders, meals, list_transactions, plan_order, plan_cancel, list_proposals (plus the memory tools). They return compact JSON with no internal keys except `order_key`. Tool errors (FlexiError messages, zod validation) go back as `is_error` results.
 - **Approval gate = approval executes.** There is no place/cancel tool at all. `plan_order`/`plan_cancel` store a proposal (`P1`, ...) in `ApprovalDesk`; only `Agent.approve(id, human)` (from the chat UI) executes it. Approval re-plans and refuses ("stale") if items/total changed or it became invalid; expires after 30 min; executes at most once; an unconfirmed result is `unknown` (FlexiError kind `outcome_unknown`) and is never retried. The outcome reaches the model as a `[host event]` text block on the next user turn. Proposals are in memory only (lost on restart, which is the safe direction).
 - Tests guard this with mutation checks (`test/approvals.test.ts`, `test/agent.test.ts`, fake Messages API in the latter).
 - Known rough edge: in `npm run chat`, a line typed while a turn is running is dropped (readline has no pending question). The web chat queues instead.

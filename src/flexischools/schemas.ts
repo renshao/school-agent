@@ -125,3 +125,35 @@ export const ItemListResponse = z.object({
   supplierDistributionTimeKey: z.string(),
   itemCategories: z.array(z.object({ name: z.string(), items: z.array(menuItem) })),
 });
+
+// GraphQL at servicebff (POST /api/v1.0/graphql/). Errors come back as HTTP 200 with `errors`.
+export const GraphqlEnvelope = z.object({
+  data: z.unknown().optional(),
+  errors: z.array(z.object({ message: z.string() })).nullish(),
+});
+
+// query getUserAccount($userKey: String!)
+export const UserAccountData = z.object({
+  getUserAccount: z.object({
+    accountKey: z.string(),
+    accountState: z.string(),
+    availableBalance: z.number(),
+    currentBalance: z.number(),
+  }),
+});
+
+// query findTransactions($accountKey: ID!, $transactionDateFrom: DateTime!, $transactionDateTo: DateTime!)
+export const TransactionsData = z.object({
+  findTransactions: z.array(
+    z.object({
+      balance: z.number(),
+      firstName: z.string().nullable(),
+      lastName: z.string().nullable(),
+      description: z.string().nullable(),
+      debitCredit: z.number(),
+      orderId: z.union([z.string(), z.number()]).nullable(),
+      transactionDate: z.string().refine((s) => Number.isFinite(Date.parse(s)), "not a date"),
+      userKey: z.string().nullable(),
+    }),
+  ),
+});

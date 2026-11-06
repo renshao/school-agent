@@ -1,6 +1,6 @@
 // Plain command-line interface to Flexischools (no LLM). Usage: npm run flexi -- <command> [args]
 import { parseArgs } from "node:util";
-import { createFlexiClient, FlexiClient, FlexiError, parseItemSpec, resolveDate, resolveLine } from "./flexischools/index.ts";
+import { addDays, createFlexiClient, FlexiClient, FlexiError, mealsBetween, parseItemSpec, resolveDate, resolveLine } from "./flexischools/index.ts";
 import type { CheckRow, MenuItem, Order, OrderDetail, OrderDay, Student } from "./flexischools/index.ts";
 
 const USAGE = `flexi: Flexischools from the command line
@@ -10,6 +10,8 @@ const USAGE = `flexi: Flexischools from the command line
   days <student> <service>              Orderable days (cutoff passed? closures?)
   orders [--student S] [--from D] [--to D] [--all]     Orders (D: today|tomorrow|yesterday|+N|YYYY-MM-DD)
   order <orderKey>                      One order with its state history
+  meals [--student S] [--from D] [--to D]              What each child had: ordered meals + student-card purchases
+  transactions [--from D] [--to D]      Wallet balance and account history (default: the last 7 days)
   menu <student> <service> <date> [--all]              Menu (in-stock only unless --all)
   check [--date D] [--student S] [--service RE]        Is lunch ordered? exit 1 if something is missing
   place <student> <service> <date> <item>... [--yes]   Place an order (dry run unless --yes)
@@ -105,6 +107,27 @@ async function main(): Promise<number> {
         maxPages: values.from || values.to ? 20 : 1,
       });
       print(json, orders, orders.length ? orders.map(fmtOrder).join("\n") : "(no orders)");
+      return 0;
+    }
+    case "meals": {
+      const from = resolveDate(values.from ?? "today");
+      const to = values.to ? resolveDate(values.to) : from;
+      const students = values.student ? [await client.findStudent(values.student)] : await client.listStudents();
+      const [orders, transactions] = await Promise.all([
+        client.listOrders({ from, to, ...(values.student ? { studentKey: students[0]!.key } : {}), maxPages: 20 }),
+        client.listTransactions({ from, to }),
+      ]);
+      const meals = mealsBetween({ from, to, students, orders, transactions });
+      const text = meals.map((m) => `${m.date}  ${m.student.padEnd(10)} ${(m.service ?? `card ${m.time}`).padEnd(14)} ${money(m.total).padStart(7)}  ${m.items.join(", ")}`);
+      print(json, meals, text.length ? text.join("\n") : "(nothing)");
+      return 0;
+    }
+    case "transactions": {
+      const to = resolveDate(values.to ?? "today");
+      const from = values.from ? resolveDate(values.from) : addDays(to, -6);
+      const [account, rows] = await Promise.all([client.getAccount(), client.listTransactions({ from, to })]);
+      const text = rows.map((t) => `${t.date} ${t.time}  ${t.name.padEnd(10)} ${t.kind.padEnd(6)} ${(t.amount < 0 ? "-" : "+") + money(Math.abs(t.amount))}`.padEnd(48) + (t.items.length ? t.items.map((i) => (i.quantity > 1 ? `${i.quantity} x ${i.name}` : i.name)).join(", ") : ""));
+      print(json, { balance: account.availableBalance, transactions: rows }, `${text.join("\n") || "(no transactions)"}\nBalance: ${money(account.availableBalance)}`);
       return 0;
     }
     case "order": {

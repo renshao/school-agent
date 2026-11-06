@@ -4,7 +4,7 @@
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import type { BetaRunnableTool } from "@anthropic-ai/sdk/lib/tools/BetaRunnableTool";
 import { z } from "zod";
-import { FlexiClient, FlexiError, resolveDate, ymdInZone } from "../flexischools/index.ts";
+import { addDays, FlexiClient, FlexiError, mealsBetween, resolveDate, ymdInZone } from "../flexischools/index.ts";
 import type { MenuItem, Order, OrderDetail, Student } from "../flexischools/index.ts";
 import { describeProposal } from "./approvals.ts";
 import type { ApprovalDesk, Proposal } from "./approvals.ts";
@@ -86,6 +86,14 @@ export function createTools(ctx: ToolContext): BetaRunnableTool<any>[] {
   const { client, desk, memory } = ctx;
   const day = (d: string | undefined, fallback: string): string => resolveDate(d ?? fallback, ctx.now());
   const author = (): string => ctx.author?.() ?? "a parent";
+  /** from/to (to defaults to from), in order and at most `maxDays` long. */
+  const dayRange = (from: string | undefined, to: string | undefined, maxDays: number): { from: string; to: string } => {
+    const f = day(from, "today");
+    const t = to ? day(to, "today") : f;
+    if (t < f) throw new FlexiError("precondition", `"to" (${t}) is before "from" (${f})`);
+    if (addDays(f, maxDays - 1) < t) throw new FlexiError("precondition", `At most ${maxDays} days at a time`);
+    return { from: f, to: t };
+  };
 
   const memoryTools: BetaRunnableTool<any>[] = !memory
     ? []
@@ -240,6 +248,70 @@ export function createTools(ctx: ToolContext): BetaRunnableTool<any>[] {
       description: "One order in detail: items, fee, state, its state history, and whether it can still be cancelled.",
       inputSchema: z.object({ order_key: z.string().describe("order_key from list_orders") }),
       run: async ({ order_key }) => out(orderDetailView(await client.getOrder(order_key))),
+    }),
+
+    betaZodTool({
+      name: "meals",
+      description:
+        'What each child had from the canteen on given days, from both sources: meals ordered online (source "order", with the service, on the day served) and purchases made at the counter with the student card (source "card", with the school-local time; no order exists for these). Use it for "what did X have for lunch/recess". Card purchases do not say recess or lunch: judge by the time (about 10-11am is usually recess, about 12-1pm lunch) and the item names.',
+      inputSchema: z.object({
+        student: studentArg.optional(),
+        from: dateArg.optional().describe('First day (default "today"). "yesterday" and -N work too.'),
+        to: dateArg.optional().describe("Last day, inclusive (default: the same as from)."),
+      }),
+      run: async ({ student, from, to }) => {
+        const range = dayRange(from, to, 62);
+        const students = student ? [await client.findStudent(student)] : await client.listStudents();
+        const [orders, card] = await Promise.all([
+          client.listOrders({ ...range, ...(student ? { studentKey: students[0]!.key } : {}), maxPages: 20 }),
+          client.listTransactions(range).then(
+            (t) => ({ transactions: t, error: undefined }),
+            (e: unknown) => ({ transactions: [], error: e instanceof Error ? e.message : String(e) }),
+          ),
+        ]);
+        const meals = mealsBetween({ ...range, students, orders, transactions: card.transactions });
+        return out({
+          ...range,
+          meals: meals.map((m) => ({ date: m.date, student: m.student, source: m.source, ...(m.service ? { service: m.service } : {}), ...(m.time ? { time: m.time } : {}), items: m.items, total: m.total })),
+          ...(card.error ? { warning: `Card purchases could not be read (${card.error}); only ordered meals are listed.` } : {}),
+        });
+      },
+    }),
+
+    betaZodTool({
+      name: "list_transactions",
+      description:
+        "The Flexischools wallet: current balance and its history for a date range: card purchases at the counter (with items), order charges (posted the evening of the day an order was served), top-ups and fees. Use it for money questions (balance, spending, top-ups). For what a child ate, use meals.",
+      inputSchema: z.object({
+        from: dateArg.optional().describe('First day (default: 6 days before "to").'),
+        to: dateArg.optional().describe('Last day, inclusive (default "today").'),
+        student: studentArg.optional().describe("Only this child's rows."),
+      }),
+      run: async ({ from, to, student }) => {
+        const end = day(to, "today");
+        const range = dayRange(from ?? addDays(end, -6), end, 62);
+        const [account, rows, s] = await Promise.all([client.getAccount(), client.listTransactions(range), student ? client.findStudent(student) : undefined]);
+        const mine = s ? rows.filter((t) => t.userKey === s.key) : rows;
+        const spent = new Map<string, number>();
+        for (const t of mine) if (t.amount < 0) spent.set(t.name, Math.round(((spent.get(t.name) ?? 0) - t.amount) * 100) / 100);
+        return out({
+          balance: account.availableBalance,
+          ...range,
+          spent_by: Object.fromEntries(spent),
+          transactions: mine.map((t) => ({
+            date: t.date,
+            time: t.time,
+            who: t.name,
+            kind: t.kind,
+            amount: t.amount,
+            ...(t.items.length ? { items: t.items.map((i) => (i.quantity > 1 ? `${i.quantity} x ${i.name}` : i.name)) } : {}),
+            ...(t.fee ? { fee: t.fee } : {}),
+            ...(t.orderId ? { order_id: t.orderId } : {}),
+            ...(t.place ? { place: t.place } : {}),
+            ...(t.kind === "other" || t.kind === "fee" ? { description: t.description.slice(0, 120) } : {}),
+          })),
+        });
+      },
     }),
 
     betaZodTool({

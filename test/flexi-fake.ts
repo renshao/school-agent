@@ -1,7 +1,7 @@
 // A FlexiClient wired to a fake Flexischools API (synthetic fixtures), shared by the agent and approval tests.
 import { FlexiClient } from "../src/flexischools/client.ts";
 import { FlexiHttp } from "../src/flexischools/http.ts";
-import { availableServicesResponse, fulfillmentDatesResponse, itemListResponse, orderDetailResponse, orderFeeResponse, orderHistoryResponse, placeOrderResponse, studentsResponse } from "./fixtures.ts";
+import { accountResponse, availableServicesResponse, fulfillmentDatesResponse, itemListResponse, orderDetailResponse, orderFeeResponse, orderHistoryResponse, placeOrderResponse, studentsResponse, transactionsResponse, USER_KEY } from "./fixtures.ts";
 import { fakeFetch, json } from "./helpers.ts";
 import type { Call, Handler } from "./helpers.ts";
 
@@ -14,7 +14,9 @@ export const isWrite = (c: Call): boolean => isPlaceOrder(c) || c.method === "DE
 /** Placing succeeds (POST returns ord-new, read-back is Placed); cancelling ord-1 succeeds. Extra handlers win. */
 export function fakeFlexi(...extra: Handler[]) {
   let cancelled = false;
-  const tokens = { async getIdToken() { return "tok"; } };
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const idToken = `${b64({ alg: "none" })}.${b64({ exp: 4102444800, "custom:toca_user_key": USER_KEY })}.sig`;
+  const tokens = { async getIdToken() { return idToken; } };
   const { fetch, calls } = fakeFetch(
     ...extra,
     route("GET", /service-categories\/1\/students$/, () => json(studentsResponse)),
@@ -23,6 +25,10 @@ export function fakeFlexi(...extra: Handler[]) {
     route("GET", /\/itemlist$/, () => json(itemListResponse)),
     route("GET", /\/orderfee$/, () => json(orderFeeResponse)),
     route("POST", /orders\/order-history$/, () => json(orderHistoryResponse)),
+    route("POST", /\/api\/v1\.0\/graphql\/$/, (c) => {
+      const op = (JSON.parse(c.body ?? "{}") as { operationName?: string }).operationName;
+      return json(op === "getUserAccount" ? accountResponse : op === "findTransactions" ? transactionsResponse : { errors: [{ message: `unknown operation ${op}` }] });
+    }),
     route("POST", /\/api\/v2\.0\/orders$/, () => json(placeOrderResponse)),
     route("GET", /\/api\/v1\.0\/orders\/ord-new$/, () => json({ ...orderDetailResponse("Placed", true), orderKey: { id: 1, value: "ord-new" } })),
     route("DELETE", /\/api\/v1\.0\/orders\/ord-1$/, () => ((cancelled = true), json(null))),

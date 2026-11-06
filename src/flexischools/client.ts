@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 import { checkOrders } from "./check.ts";
 import type { CheckRow } from "./check.ts";
-import { CHANNEL_ORDERING_PORTAL } from "./config.ts";
-import { datePart } from "./dates.ts";
+import { CHANNEL_ORDERING_PORTAL, SERVICE_BFF_BASE_URL } from "./config.ts";
+import { addDays, datePart } from "./dates.ts";
 import { FlexiError } from "./errors.ts";
 import { buildOrderItem } from "./request.ts";
 import type { FlexiHttp } from "./http.ts";
@@ -22,9 +22,15 @@ import {
   OrderDetailResponse,
   OrderFeeResponse,
   OrderHistoryResponse,
+  GraphqlEnvelope,
   StudentsResponse,
+  TransactionsData,
+  UserAccountData,
 } from "./schemas.ts";
+import { normalizeTransaction } from "./transactions.ts";
 import type {
+  Account,
+  Transaction,
   Menu,
   Order,
   OrderDay,
@@ -92,8 +98,21 @@ export interface ListOrdersOptions {
   maxPages?: number;
 }
 
+const GRAPHQL_URL = `${SERVICE_BFF_BASE_URL}/api/v1.0/graphql/`;
+
+const GET_USER_ACCOUNT = `query getUserAccount($userKey: String!) {
+  getUserAccount(userKey: $userKey) { accountKey accountState availableBalance currentBalance }
+}`;
+
+const FIND_TRANSACTIONS = `query findTransactions($accountKey: ID!, $transactionDateFrom: DateTime!, $transactionDateTo: DateTime!) {
+  findTransactions(accountKey: $accountKey, transactionDateFrom: $transactionDateFrom, transactionDateTo: $transactionDateTo) {
+    balance firstName lastName description debitCredit orderId transactionDate userKey
+  }
+}`;
+
 export class FlexiClient {
   private http: FlexiHttp;
+  private accountKey: string | undefined;
 
   constructor(http: FlexiHttp) {
     this.http = http;
@@ -168,6 +187,44 @@ export class FlexiClient {
       .filter((o) => (opts.includeInactive ? true : o.active))
       .filter((o) => (opts.studentKey ? o.studentKey === opts.studentKey : true))
       .sort((a, b) => b.dueLocal.localeCompare(a.dueLocal));
+  }
+
+  // ---- wallet ----------------------------------------------------------------------------------------------
+
+  /** The wallet: balance and the key the account history needs. Our user key comes from the ID token. */
+  async getAccount(): Promise<Account> {
+    const userKey = (await this.http.idTokenClaims())["custom:toca_user_key"];
+    if (typeof userKey !== "string" || !userKey) throw new FlexiError("schema", "ID token has no custom:toca_user_key claim (API changed?)");
+    const a = parse(UserAccountData, await this.graphql("getUserAccount", GET_USER_ACCOUNT, { userKey }), "getUserAccount").getUserAccount;
+    this.accountKey = a.accountKey;
+    return { accountKey: a.accountKey, state: a.accountState, availableBalance: a.availableBalance, currentBalance: a.currentBalance };
+  }
+
+  /**
+   * Account history for school-local dates [from, to], oldest first: card purchases at the canteen (with items),
+   * order charges (posted when an order closes, the evening of the day it was served), top-ups and fees.
+   */
+  async listTransactions(opts: { from: string; to: string }): Promise<Transaction[]> {
+    if (opts.to < opts.from) throw new FlexiError("precondition", `"to" (${opts.to}) is before "from" (${opts.from})`);
+    const accountKey = this.accountKey ?? (await this.getAccount()).accountKey;
+    // The API takes UTC instants; a day of padding each side covers the timezone, then filter by local date.
+    const raw = await this.graphql("findTransactions", FIND_TRANSACTIONS, {
+      accountKey,
+      transactionDateFrom: `${addDays(opts.from, -1)}T00:00:00Z`,
+      transactionDateTo: `${addDays(opts.to, 1)}T23:59:59Z`,
+    });
+    return parse(TransactionsData, raw, "findTransactions")
+      .findTransactions.map((r) => normalizeTransaction(r))
+      .filter((t) => t.date >= opts.from && t.date <= opts.to)
+      .sort((a, b) => a.at.localeCompare(b.at));
+  }
+
+  /** One GraphQL operation; its `errors` (sent with HTTP 200) become a FlexiError. Returns `data`. */
+  private async graphql(operationName: string, query: string, variables: Record<string, unknown>): Promise<unknown> {
+    const env = parse(GraphqlEnvelope, await this.http.request("POST", GRAPHQL_URL, { body: { operationName, query, variables } }), operationName);
+    if (env.errors?.length) throw new FlexiError("http", `${operationName}: ${env.errors.map((e) => e.message).join("; ").slice(0, 200)}`);
+    if (env.data == null) throw new FlexiError("schema", `${operationName}: no data`);
+    return env.data;
   }
 
   async getOrder(orderKey: string): Promise<OrderDetail> {

@@ -210,3 +210,41 @@ export const placeOrderResponse = {
   orderPlaced: true,
   error: null,
 };
+
+// ---- wallet (GraphQL at servicebff) --------------------------------------------------------------------------
+
+/** The parent's user key, carried in the ID token as custom:toca_user_key. */
+export const USER_KEY = "usr-parent";
+
+export const accountResponse = { data: { getUserAccount: { accountKey: "acct-1", accountState: "Active", availableBalance: 62.4, currentBalance: 62.4 } } };
+
+const txRow = (at: string, firstName: string, userKey: string | null, amount: number, balance: number, description: string, orderId: number | null = null) => ({
+  balance,
+  firstName,
+  lastName: "Example",
+  description,
+  debitCredit: amount,
+  orderId,
+  transactionDate: at,
+  userKey,
+});
+const card = (items: string) => `Card transaction for: '${items}' using Card Number: 'CARD0001' at Example School Canteen by Example Caterer by Impos User ,Student Card Fee $0.18`;
+
+/** Newest first, like the API. Times are UTC; Sydney is UTC+11 in November. */
+export const transactionsResponse = {
+  data: {
+    findTransactions: [
+      // Alice's lunch order charge, posted when the order closed (17:52 local on the day served).
+      txRow("2026-11-06T06:52:41.387Z", "Alice", K.stuA, -4.69, 62.4, "Order (900002): Cheese Sandwich (White) $4.30, Order Fee $0.39", 900002),
+      // Bob at the counter: lunch 12:58 local, recess 10:42 local (still 5 Nov in UTC).
+      txRow("2026-11-06T01:58:59.01Z", "Bob", K.stuB, -11.68, 67.09, card("CHICKEN CURRY / HONEY SOY $11.50")),
+      txRow("2026-11-05T23:42:15.66Z", "Bob", K.stuB, -10.18, 78.77, card("recess 5.00 $5.00, Juice $5.00")),
+      txRow("2026-11-04T01:33:44.487Z", "Bob", K.stuB, -12.98, 88.95, card("Bacon, Egg & Cheese Roll $6.80, 2 x Cookie $6.00")),
+      // 00:00 local on 4 Nov (still 3 Nov in UTC).
+      txRow("2026-11-03T13:00:01Z", "Ren", USER_KEY, -1.8, 101.93, "PayPal Surcharge ($0.30 + 1% of $150)"),
+      txRow("2026-11-03T13:00:00Z", "Ren", USER_KEY, 150, 103.73, "Automatic Credit purchase. Charged to PayPal 'parent@example.com'. (Txn ID: abc123)"),
+      // An empty card row the API really returns now and then.
+      txRow("2026-11-02T02:45:46.737Z", "Bob", K.stuB, 0, -46.27, "Card transaction for: '' using Card Number: '' by canteen@example.com"),
+    ],
+  },
+};

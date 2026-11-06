@@ -180,3 +180,53 @@ export interface OrderPlan {
     total: number;
   };
 }
+
+/** The household's Flexischools wallet (one per parent login). */
+export interface Account {
+  accountKey: string;
+  state: string;
+  availableBalance: number;
+  currentBalance: number;
+}
+
+/**
+ * - card: a purchase at the canteen with a student card (no order; how a child "buys their own lunch")
+ * - order: the charge for an online order, posted when the order closes (the evening of the day it was served;
+ *   so today's orders appear only in the evening, and cancelled orders never)
+ * - top_up: money added to the wallet (e.g. an automatic top-up from PayPal)
+ * - fee: a separate charge such as a payment surcharge
+ */
+export type TransactionKind = "card" | "order" | "top_up" | "fee" | "other";
+
+export interface TransactionItem {
+  name: string;
+  quantity: number;
+  /** Line price as shown (already multiplied by the quantity). */
+  price: number;
+}
+
+/** One row of the account history. */
+export interface Transaction {
+  /** ISO instant (UTC). */
+  at: string;
+  /** School-local YYYY-MM-DD and HH:MM of `at`. */
+  date: string;
+  time: string;
+  /** First name on the row: a child (card purchases, orders) or a parent / system (top-ups). */
+  name: string;
+  /** For a child's row, the student key. */
+  userKey: string | null;
+  /** Negative = money spent. */
+  amount: number;
+  /** Wallet balance after this row. */
+  balance: number;
+  kind: TransactionKind;
+  orderId: string | null;
+  /** Parsed from the description for card and order rows (fees excluded). */
+  items: TransactionItem[];
+  /** Order fee or student card fee, when the description states one. */
+  fee: number;
+  /** Where a card purchase was made, e.g. "Example School Canteen". */
+  place: string | null;
+  description: string;
+}
